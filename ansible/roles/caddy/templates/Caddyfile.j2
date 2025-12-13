@@ -8,7 +8,7 @@
 
 # Billing API
 billing1.{{ dns_soa }} {
-    reverse_proxy ciris-billing:{{ billing_port }} {
+    reverse_proxy ciris-billing:8000 {
         health_uri /health
         health_interval 30s
     }
@@ -28,10 +28,7 @@ billing1.{{ dns_soa }} {
 
 # LLM Proxy
 proxy1.{{ dns_soa }} {
-    reverse_proxy ciris-proxy:{{ proxy_port }} {
-        health_uri /health
-        health_interval 30s
-    }
+    reverse_proxy ciris-proxy:{{ proxy_port }}
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -48,7 +45,7 @@ proxy1.{{ dns_soa }} {
 
 # Agents endpoint (same as billing for now)
 agents.{{ dns_soa }} {
-    reverse_proxy ciris-billing:{{ billing_port }} {
+    reverse_proxy ciris-billing:8000 {
         health_uri /health
         health_interval 30s
     }
@@ -65,6 +62,7 @@ agents.{{ dns_soa }} {
 lens.{{ dns_soa }} {
     # API routes (log ingestion, admin)
     handle /api/* {
+        uri strip_prefix /api
         reverse_proxy cirislens-api:8000
     }
 

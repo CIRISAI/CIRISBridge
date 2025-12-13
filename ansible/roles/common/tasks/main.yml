@@ -19,7 +19,6 @@
       - vim
       - git
       - jq
-      - yq
       - unzip
     state: present
 
@@ -68,9 +67,13 @@
     url: https://download.docker.com/linux/ubuntu/gpg
     state: present
 
+- name: Set Docker arch fact
+  ansible.builtin.set_fact:
+    docker_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
 - name: Add Docker repository
   ansible.builtin.apt_repository:
-    repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    repo: "deb [arch={{ docker_arch }}] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
     state: present
 
 - name: Install Docker

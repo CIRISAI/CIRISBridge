@@ -34,8 +34,8 @@
   delay: 5
   until: result.status == 200
 
-- name: Run database migrations (primary only)
+- name: Run database migrations (US node only to avoid conflicts)
   community.docker.docker_container_exec:
     container: ciris-billing
     command: alembic upgrade head
-  when: postgres_role == "primary"
+  when: node_name == "us"

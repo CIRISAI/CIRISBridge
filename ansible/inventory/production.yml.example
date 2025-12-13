@@ -49,7 +49,7 @@ all:
     # Docker image tags (all from GHCR)
     billing_image: ghcr.io/cirisai/cirisbilling:latest
     proxy_image: ghcr.io/cirisai/cirisproxy:latest
-    lens_api_image: ghcr.io/cirisai/cirislens-api:latest
+    lens_api_image: ghcr.io/cirisai/cirislens:latest
 
     # Service ports
     billing_port: 8080

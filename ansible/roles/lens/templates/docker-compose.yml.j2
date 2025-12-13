@@ -78,6 +78,7 @@ services:
       - "127.0.0.1:3001:3000"
     networks:
       - cirislens
+      - ciris
     depends_on:
       postgres:
         condition: service_healthy
@@ -107,6 +108,7 @@ services:
       - "127.0.0.1:8200:8000"
     networks:
       - cirislens
+      - ciris
     depends_on:
       postgres:
         condition: service_healthy
@@ -120,3 +122,6 @@ services:
 networks:
   cirislens:
     driver: bridge
+  ciris:
+    external: true
+    name: postgres_ciris

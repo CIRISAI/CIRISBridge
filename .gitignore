@@ -54,3 +54,4 @@ logs/
 .pytest_cache/
 htmlcov/
 .coverage
+ansible/.ansible_cache/

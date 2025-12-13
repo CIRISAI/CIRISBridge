@@ -20,15 +20,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    depends_on:
-      - postgres
-
-  # Reference to external postgres service
-  postgres:
-    external: true
-    name: ciris-postgres
 
 networks:
   ciris:
     external: true
-    name: ciris-postgres_ciris
+    name: postgres_ciris
