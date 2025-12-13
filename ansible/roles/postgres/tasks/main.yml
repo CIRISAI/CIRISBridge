@@ -1,0 +1,161 @@
+# Deploy PostgreSQL with Bi-Directional Logical Replication
+# Active/Active configuration with last-write-wins conflict resolution
+---
+- name: Create PostgreSQL directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /opt/ciris/postgres
+    - /opt/ciris/postgres/conf
+    - /opt/ciris/postgres/scripts
+
+- name: Create PostgreSQL data directory
+  ansible.builtin.file:
+    path: /opt/ciris/postgres/data
+    state: directory
+    mode: "0700"
+
+- name: Copy PostgreSQL docker-compose
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /opt/ciris/postgres/docker-compose.yml
+    mode: "0644"
+
+- name: Copy PostgreSQL config (unified for active/active)
+  ansible.builtin.template:
+    src: postgresql.conf.j2
+    dest: /opt/ciris/postgres/conf/postgresql.conf
+    mode: "0644"
+  notify: Restart PostgreSQL
+
+- name: Copy pg_hba.conf
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: /opt/ciris/postgres/conf/pg_hba.conf
+    mode: "0644"
+  notify: Restart PostgreSQL
+
+# =============================================================================
+# Firewall: Allow bi-directional PostgreSQL from peer
+# =============================================================================
+- name: Allow PostgreSQL from peer node
+  community.general.ufw:
+    rule: allow
+    port: "5432"
+    proto: tcp
+    from_ip: "{{ peer_ip }}"
+
+# =============================================================================
+# Start PostgreSQL
+# =============================================================================
+- name: Start PostgreSQL
+  community.docker.docker_compose_v2:
+    project_src: /opt/ciris/postgres
+    state: present
+    pull: always
+
+- name: Wait for PostgreSQL to be ready
+  ansible.builtin.wait_for:
+    port: 5432
+    delay: 5
+    timeout: 60
+
+# =============================================================================
+# Create replication user (on both nodes)
+# =============================================================================
+- name: Create replication user
+  community.docker.docker_container_exec:
+    container: ciris-postgres
+    command: >
+      psql -U postgres -c
+      "DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'replicator') THEN
+          CREATE USER replicator WITH REPLICATION LOGIN ENCRYPTED PASSWORD '{{ replication_password }}';
+          GRANT ALL PRIVILEGES ON DATABASE ciris_billing TO replicator;
+        END IF;
+      END
+      $$;"
+  register: create_replicator
+  changed_when: "'CREATE' in create_replicator.stdout"
+
+# =============================================================================
+# Create application users
+# =============================================================================
+- name: Create billing_admin user
+  community.docker.docker_container_exec:
+    container: ciris-postgres
+    command: >
+      psql -U postgres -c
+      "DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'billing_admin') THEN
+          CREATE USER billing_admin WITH ENCRYPTED PASSWORD '{{ billing_db_password }}';
+          GRANT ALL PRIVILEGES ON DATABASE ciris_billing TO billing_admin;
+        END IF;
+      END
+      $$;"
+  ignore_errors: true
+
+# =============================================================================
+# Set up Publication (each node publishes its changes)
+# =============================================================================
+- name: Create publication for all tables
+  community.docker.docker_container_exec:
+    container: ciris-postgres
+    command: >
+      psql -U postgres -d ciris_billing -c
+      "DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_publication WHERE pubname = 'ciris_pub_{{ node_name }}') THEN
+          CREATE PUBLICATION ciris_pub_{{ node_name }} FOR ALL TABLES;
+        END IF;
+      END
+      $$;"
+  register: create_pub
+  changed_when: "'CREATE' in create_pub.stdout"
+
+# =============================================================================
+# Grant replicator access to all tables
+# =============================================================================
+- name: Grant replicator access to all tables
+  community.docker.docker_container_exec:
+    container: ciris-postgres
+    command: >
+      psql -U postgres -d ciris_billing -c
+      "GRANT SELECT ON ALL TABLES IN SCHEMA public TO replicator;
+       ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO replicator;"
+  ignore_errors: true
+
+# =============================================================================
+# Copy bi-directional replication setup script
+# =============================================================================
+- name: Copy replication setup script
+  ansible.builtin.template:
+    src: setup-bidirectional-replication.sql.j2
+    dest: /opt/ciris/postgres/scripts/setup-replication.sql
+    mode: "0644"
+
+# =============================================================================
+# Note: Subscription creation is done after initial deployment
+# because both nodes need to be running first
+# =============================================================================
+- name: Create subscription setup instructions
+  ansible.builtin.copy:
+    content: |
+      # Bi-Directional Replication Setup for {{ node_name }}
+      # Run this AFTER both nodes are deployed and can reach each other
+      #
+      # On this node ({{ node_name }}), subscribe to peer:
+      #
+      # docker exec -it ciris-postgres psql -U postgres -d ciris_billing -c \
+      #   "CREATE SUBSCRIPTION ciris_sub_from_{{ 'eu' if node_name == 'us' else 'us' }} \
+      #    CONNECTION 'host={{ peer_ip }} port=5432 dbname=ciris_billing user=replicator password={{ replication_password }}' \
+      #    PUBLICATION ciris_pub_{{ 'eu' if node_name == 'us' else 'us' }} \
+      #    WITH (copy_data = false, origin = none);"
+      #
+      # The 'origin = none' prevents replication loops (changes from peer won't be re-replicated back)
+    dest: /opt/ciris/postgres/REPLICATION_SETUP.md
+    mode: "0644"

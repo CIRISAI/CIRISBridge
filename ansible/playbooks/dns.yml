@@ -1,0 +1,27 @@
+# Deploy DNS (Constellation) only
+#
+# Usage:
+#   ansible-playbook playbooks/dns.yml
+
+---
+- name: Deploy Constellation DNS
+  hosts: all
+  become: true
+
+  roles:
+    - common
+    - constellation
+
+  post_tasks:
+    - name: Verify DNS is running
+      ansible.builtin.uri:
+        url: "http://localhost:8080/health"
+        status_code: 200
+      register: dns_health
+      retries: 5
+      delay: 3
+      until: dns_health.status == 200
+
+    - name: Display DNS status
+      ansible.builtin.debug:
+        msg: "DNS healthy on {{ inventory_hostname }}"

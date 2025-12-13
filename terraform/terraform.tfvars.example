@@ -1,0 +1,51 @@
+# CIRISBridge Terraform Variables
+# Copy to terraform.tfvars and fill in your values
+# NEVER COMMIT terraform.tfvars TO VERSION CONTROL
+
+# =============================================================================
+# Provider Credentials
+# =============================================================================
+
+vultr_api_key     = "your_vultr_api_key_here"
+hetzner_api_token = "your_hetzner_api_token_here"
+
+# =============================================================================
+# SSH Configuration
+# =============================================================================
+
+# Your SSH public key (will be added to servers)
+ssh_public_key = "ssh-ed25519 AAAA... your-email@example.com"
+
+# Your current IP address for SSH access
+# Find with: curl -s ifconfig.me
+admin_ip = "1.2.3.4"
+
+# =============================================================================
+# Region Selection
+# =============================================================================
+
+# Vultr region - staying in Chicago since that's where existing infra is
+vultr_region = "ord"  # Chicago
+
+# Hetzner location - EU for geographic redundancy
+hetzner_location = "fsn1"  # Falkenstein, Germany
+
+# =============================================================================
+# Instance Sizes
+# =============================================================================
+
+# Vultr: 2 vCPU, 4GB RAM (~$24/mo)
+vultr_plan = "vc2-2c-4gb"
+
+# Hetzner: 2 vCPU, 4GB RAM (~€6/mo)
+hetzner_server_type = "cx22"
+
+# Hetzner volume for PostgreSQL replica
+hetzner_volume_size = 20  # GB (~€1/mo)
+
+# =============================================================================
+# Domains
+# =============================================================================
+
+primary_domain   = "ciris-services-1.ai"
+secondary_domain = "ciris-services-2.ai"

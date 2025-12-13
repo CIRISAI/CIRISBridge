@@ -1,0 +1,56 @@
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/.terraform.lock.hcl
+terraform/terraform.tfvars
+
+# Ansible
+ansible/*.retry
+ansible/inventory/production.yml
+ansible/inventory/staging.yml
+
+# Secrets - NEVER COMMIT
+.env
+*.env
+secrets/
+*.pem
+*.key
+id_rsa*
+*.crt
+
+# Docker
+docker/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Backup files
+*.bak
+*.backup
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage

@@ -1,0 +1,44 @@
+# Deploy Constellation DNS
+---
+- name: Copy Constellation docker-compose
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /opt/ciris/dns/docker-compose.yml
+    mode: "0644"
+
+- name: Copy Constellation config
+  ansible.builtin.template:
+    src: config.cfg.j2
+    dest: /opt/ciris/dns/config.cfg
+    mode: "0644"
+  notify: Restart Constellation
+
+- name: Create Constellation data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /opt/ciris/dns/data
+    - /opt/ciris/dns/data/geoip
+
+- name: Copy zones.yaml
+  ansible.builtin.template:
+    src: zones.yaml.j2
+    dest: /opt/ciris/dns/zones.yaml
+    mode: "0644"
+
+- name: Start Constellation
+  community.docker.docker_compose_v2:
+    project_src: /opt/ciris/dns
+    state: present
+    pull: always
+
+- name: Wait for Constellation to be ready
+  ansible.builtin.uri:
+    url: "http://localhost:8080/health"
+    status_code: 200
+  register: result
+  retries: 10
+  delay: 3
+  until: result.status == 200

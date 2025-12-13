@@ -1,0 +1,84 @@
+-- Bi-Directional Logical Replication Setup for {{ node_name }} node
+-- Run this AFTER both nodes are deployed
+--
+-- This node: {{ node_name }} ({{ 'us_ip' if node_name == 'us' else 'eu_ip' }})
+-- Peer node: {{ 'eu' if node_name == 'us' else 'us' }} ({{ peer_ip }})
+
+-- =============================================================================
+-- Step 1: Verify prerequisites
+-- =============================================================================
+-- Check wal_level is 'logical'
+SELECT name, setting FROM pg_settings WHERE name = 'wal_level';
+
+-- Check track_commit_timestamp is on (for last-write-wins)
+SELECT name, setting FROM pg_settings WHERE name = 'track_commit_timestamp';
+
+-- =============================================================================
+-- Step 2: Create subscription to peer node
+-- =============================================================================
+-- This subscribes to changes FROM the peer node
+-- origin = none: prevents replication loops (don't re-replicate what we received)
+-- copy_data = false: assume tables are already in sync (or use true for initial sync)
+
+{% if node_name == 'us' %}
+CREATE SUBSCRIPTION ciris_sub_from_eu
+  CONNECTION 'host={{ peer_ip }} port=5432 dbname=ciris_billing user=replicator password={{ replication_password }}'
+  PUBLICATION ciris_pub_eu
+  WITH (copy_data = false, origin = none);
+{% else %}
+CREATE SUBSCRIPTION ciris_sub_from_us
+  CONNECTION 'host={{ peer_ip }} port=5432 dbname=ciris_billing user=replicator password={{ replication_password }}'
+  PUBLICATION ciris_pub_us
+  WITH (copy_data = false, origin = none);
+{% endif %}
+
+-- =============================================================================
+-- Step 3: Verify replication status
+-- =============================================================================
+-- Check publication
+SELECT * FROM pg_publication;
+
+-- Check subscription
+SELECT * FROM pg_subscription;
+
+-- Check replication slots
+SELECT * FROM pg_replication_slots;
+
+-- =============================================================================
+-- Conflict Resolution: Last-Write-Wins
+-- =============================================================================
+-- PostgreSQL's logical replication uses commit timestamp for conflict resolution
+-- when track_commit_timestamp = on.
+--
+-- For INSERT conflicts (same PK): Last commit wins
+-- For UPDATE conflicts: Last commit wins
+-- For DELETE conflicts: Already deleted, no conflict
+--
+-- Note: If you need custom conflict resolution, you'll need:
+-- 1. pglogical extension with conflict handlers, OR
+-- 2. Application-level conflict resolution, OR
+-- 3. Table-level triggers to handle conflicts
+--
+-- For CIRISBilling, last-write-wins is acceptable because:
+-- - Credit operations are typically localized to one region
+-- - Usage data is append-only
+-- - Account settings rarely conflict
+
+-- =============================================================================
+-- Monitoring Queries
+-- =============================================================================
+-- Check replication lag
+SELECT
+  slot_name,
+  confirmed_flush_lsn,
+  pg_current_wal_lsn(),
+  (pg_current_wal_lsn() - confirmed_flush_lsn) AS lag_bytes
+FROM pg_replication_slots
+WHERE slot_type = 'logical';
+
+-- Check subscription status
+SELECT
+  subname,
+  subenabled,
+  subconninfo
+FROM pg_subscription;

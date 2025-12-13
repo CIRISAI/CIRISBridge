@@ -1,0 +1,5 @@
+---
+- name: Restart Billing
+  community.docker.docker_compose_v2:
+    project_src: /opt/ciris/billing
+    state: restarted

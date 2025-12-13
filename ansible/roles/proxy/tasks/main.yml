@@ -1,0 +1,42 @@
+# Deploy CIRISProxy
+---
+- name: Copy Proxy docker-compose
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /opt/ciris/proxy/docker-compose.yml
+    mode: "0644"
+
+- name: Copy Proxy environment file
+  ansible.builtin.template:
+    src: env.j2
+    dest: /opt/ciris/proxy/.env
+    mode: "0600"
+  notify: Restart Proxy
+
+- name: Copy LiteLLM config
+  ansible.builtin.template:
+    src: litellm_config.yaml.j2
+    dest: /opt/ciris/proxy/litellm_config.yaml
+    mode: "0644"
+  notify: Restart Proxy
+
+- name: Create Proxy log directory
+  ansible.builtin.file:
+    path: /var/log/ciris/proxy
+    state: directory
+    mode: "0755"
+
+- name: Start Proxy service
+  community.docker.docker_compose_v2:
+    project_src: /opt/ciris/proxy
+    state: present
+    pull: always
+
+- name: Wait for Proxy to be ready
+  ansible.builtin.uri:
+    url: "http://localhost:{{ proxy_port }}/health"
+    status_code: 200
+  register: result
+  retries: 15
+  delay: 5
+  until: result.status == 200

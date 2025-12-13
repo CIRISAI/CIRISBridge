@@ -1,0 +1,29 @@
+# Deploy CIRISBilling only
+#
+# Usage:
+#   ansible-playbook playbooks/billing.yml
+
+---
+- name: Deploy CIRISBilling
+  hosts: all
+  become: true
+
+  roles:
+    - common
+    - postgres
+    - caddy
+    - billing
+
+  post_tasks:
+    - name: Wait for billing service to start
+      ansible.builtin.uri:
+        url: "http://localhost:{{ billing_port }}/health"
+        status_code: 200
+      register: billing_health
+      retries: 10
+      delay: 5
+      until: billing_health.status == 200
+
+    - name: Display billing status
+      ansible.builtin.debug:
+        msg: "Billing healthy on {{ inventory_hostname }}: {{ billing_health.json }}"

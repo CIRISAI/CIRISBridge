@@ -1,0 +1,5 @@
+---
+- name: Restart Proxy
+  community.docker.docker_compose_v2:
+    project_src: /opt/ciris/proxy
+    state: restarted

@@ -1,0 +1,94 @@
+# CIRISBridge Full Deployment - Active/Active
+# Deploys identical services to both nodes
+#
+# Usage:
+#   ansible-playbook playbooks/site.yml
+#   ansible-playbook playbooks/site.yml --limit us
+#   ansible-playbook playbooks/site.yml --tags "dns,billing"
+#
+# Both nodes are equal peers - no primary/secondary distinction
+
+---
+- name: Common setup for all nodes
+  hosts: all
+  become: true
+  roles:
+    - common
+  tags: [common]
+
+- name: Deploy DNS (Constellation with GeoDNS)
+  hosts: all
+  become: true
+  roles:
+    - constellation
+  tags: [dns]
+
+- name: Deploy PostgreSQL (bi-directional replication)
+  hosts: all
+  become: true
+  roles:
+    - postgres
+  tags: [postgres]
+
+- name: Deploy Caddy (TLS termination)
+  hosts: all
+  become: true
+  roles:
+    - caddy
+  tags: [caddy]
+
+- name: Deploy CIRISBilling
+  hosts: all
+  become: true
+  roles:
+    - billing
+  tags: [billing]
+
+- name: Deploy CIRISProxy
+  hosts: all
+  become: true
+  roles:
+    - proxy
+  tags: [proxy]
+
+- name: Sync DNS records to Redis (both nodes)
+  hosts: all
+  become: true
+  tasks:
+    - name: Sync DNS records
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/../../scripts/sync-records.sh"
+      args:
+        creates: /var/log/ciris-dns-sync.log
+  tags: [dns-records]
+
+# =============================================================================
+# Post-deployment: Set up bi-directional replication
+# Run this AFTER both nodes are deployed and can reach each other
+# =============================================================================
+- name: Set up PostgreSQL bi-directional replication
+  hosts: all
+  become: true
+  serial: 1  # One node at a time to avoid race conditions
+  tasks:
+    - name: Check if subscription already exists
+      community.docker.docker_container_exec:
+        container: ciris-postgres
+        command: >
+          psql -U postgres -d ciris_billing -tAc
+          "SELECT COUNT(*) FROM pg_subscription WHERE subname LIKE 'ciris_sub_%';"
+      register: sub_count
+      changed_when: false
+
+    - name: Create subscription to peer node
+      community.docker.docker_container_exec:
+        container: ciris-postgres
+        command: >
+          psql -U postgres -d ciris_billing -c
+          "CREATE SUBSCRIPTION ciris_sub_from_{{ 'eu' if node_name == 'us' else 'us' }}
+           CONNECTION 'host={{ peer_ip }} port=5432 dbname=ciris_billing user=replicator password={{ replication_password }}'
+           PUBLICATION ciris_pub_{{ 'eu' if node_name == 'us' else 'us' }}
+           WITH (copy_data = false, origin = none);"
+      when: sub_count.stdout | trim == "0"
+      ignore_errors: true  # May fail if peer not ready yet
+  tags: [replication]

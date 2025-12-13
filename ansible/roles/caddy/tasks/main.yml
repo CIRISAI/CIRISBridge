@@ -1,0 +1,35 @@
+# Deploy Caddy for TLS termination
+---
+- name: Copy Caddy docker-compose
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /opt/ciris/caddy/docker-compose.yml
+    mode: "0644"
+
+- name: Create Caddy directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /opt/ciris/caddy/data
+    - /opt/ciris/caddy/config
+
+- name: Copy Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /opt/ciris/caddy/Caddyfile
+    mode: "0644"
+  notify: Restart Caddy
+
+- name: Start Caddy
+  community.docker.docker_compose_v2:
+    project_src: /opt/ciris/caddy
+    state: present
+    pull: always
+
+- name: Wait for Caddy to be ready
+  ansible.builtin.wait_for:
+    port: 443
+    delay: 10
+    timeout: 120

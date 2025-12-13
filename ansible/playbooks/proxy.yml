@@ -1,0 +1,28 @@
+# Deploy CIRISProxy only
+#
+# Usage:
+#   ansible-playbook playbooks/proxy.yml
+
+---
+- name: Deploy CIRISProxy
+  hosts: all
+  become: true
+
+  roles:
+    - common
+    - caddy
+    - proxy
+
+  post_tasks:
+    - name: Wait for proxy service to start
+      ansible.builtin.uri:
+        url: "http://localhost:{{ proxy_port }}/health"
+        status_code: 200
+      register: proxy_health
+      retries: 10
+      delay: 5
+      until: proxy_health.status == 200
+
+    - name: Display proxy status
+      ansible.builtin.debug:
+        msg: "Proxy healthy on {{ inventory_hostname }}: {{ proxy_health.json }}"
