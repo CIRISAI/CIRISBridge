@@ -51,6 +51,13 @@
     - proxy
   tags: [proxy]
 
+- name: Deploy CIRISLens (US node only - centralized observability)
+  hosts: all
+  become: true
+  roles:
+    - lens
+  tags: [lens]
+
 - name: Sync DNS records to Redis (both nodes)
   hosts: all
   become: true

@@ -46,9 +46,10 @@ all:
     secondary_domain: ciris-services-2.ai
     admin_email: admin@ciris.ai
 
-    # Docker image tags
+    # Docker image tags (all from GHCR)
     billing_image: ghcr.io/cirisai/cirisbilling:latest
     proxy_image: ghcr.io/cirisai/cirisproxy:latest
+    lens_api_image: ghcr.io/cirisai/cirislens-api:latest
 
     # Service ports
     billing_port: 8080
@@ -65,3 +66,11 @@ all:
 
     # Caddy (TLS)
     caddy_email: admin@ciris.ai
+
+    # CIRISLens (Observability - US node only)
+    lens_db_password: "CHANGE_ME"  # TimescaleDB password
+    lens_session_secret: "CHANGE_ME"  # Session signing key
+    lens_grafana_admin_password: "CHANGE_ME"  # Grafana admin password
+    lens_grafana_secret_key: "CHANGE_ME"  # Grafana secret key
+    lens_allowed_domain: ciris.ai  # OAuth domain restriction
+    lens_public_dashboards: false  # Set true for anonymous read access

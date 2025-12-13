@@ -1,0 +1,99 @@
+# Deploy CIRISLens - Observability Platform
+# Only deployed on US node (centralized logging)
+---
+- name: Check if this is the US node
+  ansible.builtin.set_fact:
+    is_lens_node: "{{ node_name == 'us' }}"
+
+- name: Skip if not US node
+  ansible.builtin.debug:
+    msg: "Skipping CIRISLens deployment - only runs on US node"
+  when: not is_lens_node
+
+- name: Deploy CIRISLens
+  when: is_lens_node
+  block:
+    - name: Create CIRISLens directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /opt/ciris/lens
+        - /opt/ciris/lens/config
+        - /opt/ciris/lens/config/grafana/provisioning/datasources
+        - /opt/ciris/lens/config/grafana/provisioning/dashboards
+        - /opt/ciris/lens/dashboards
+        - /opt/ciris/lens/sql
+        - /var/log/ciris/lens
+
+    - name: Create CIRISLens data directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+        owner: "472"  # Grafana user
+        group: "472"
+      loop:
+        - /data/cirislens
+        - /data/cirislens/postgres
+        - /data/cirislens/grafana
+
+    - name: Copy CIRISLens docker-compose
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: /opt/ciris/lens/docker-compose.yml
+        mode: "0644"
+      notify: Restart CIRISLens
+
+    - name: Copy CIRISLens environment file
+      ansible.builtin.template:
+        src: env.j2
+        dest: /opt/ciris/lens/.env
+        mode: "0600"
+      notify: Restart CIRISLens
+
+    - name: Copy Grafana datasource configuration
+      ansible.builtin.template:
+        src: grafana-datasources.yml.j2
+        dest: /opt/ciris/lens/config/grafana/provisioning/datasources/datasources.yml
+        mode: "0644"
+      notify: Restart CIRISLens
+
+    - name: Copy Grafana dashboard provisioning
+      ansible.builtin.template:
+        src: grafana-dashboards.yml.j2
+        dest: /opt/ciris/lens/config/grafana/provisioning/dashboards/dashboards.yml
+        mode: "0644"
+      notify: Restart CIRISLens
+
+    - name: Copy TimescaleDB init script
+      ansible.builtin.template:
+        src: init.sql.j2
+        dest: /opt/ciris/lens/sql/001-init.sql
+        mode: "0644"
+
+    - name: Allow Grafana port from anywhere (public dashboards)
+      community.general.ufw:
+        rule: allow
+        port: "3000"
+        proto: tcp
+      when: lens_public_grafana | default(false)
+
+    - name: Start CIRISLens
+      community.docker.docker_compose_v2:
+        project_src: /opt/ciris/lens
+        state: present
+        pull: always
+
+    - name: Wait for CIRISLens API to be ready
+      ansible.builtin.wait_for:
+        port: 8200
+        delay: 10
+        timeout: 120
+
+    - name: Wait for Grafana to be ready
+      ansible.builtin.wait_for:
+        port: 3001
+        delay: 5
+        timeout: 60

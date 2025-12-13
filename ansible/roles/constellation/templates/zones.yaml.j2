@@ -103,7 +103,15 @@ zones:
       ttl: 300
 
     # ==========================================================================
-    # CIRISLens / Agents endpoint
+    # CIRISLens - Observability (US node only - centralized)
+    # ==========================================================================
+    - name: lens
+      type: A
+      value: "{{ us_ip }}"  # Always US - centralized observability
+      ttl: 300
+
+    # ==========================================================================
+    # Agents endpoint (for CIRIS agents telemetry)
     # ==========================================================================
     - name: agents
       type: A
@@ -198,6 +206,11 @@ zones:
     - name: proxy-eu
       type: A
       value: "{{ eu_ip }}"
+      ttl: 300
+
+    - name: lens
+      type: A
+      value: "{{ us_ip }}"  # Always US - centralized observability
       ttl: 300
 
     - name: agents

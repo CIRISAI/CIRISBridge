@@ -1,0 +1,7 @@
+# CIRISLens handlers
+---
+- name: Restart CIRISLens
+  community.docker.docker_compose_v2:
+    project_src: /opt/ciris/lens
+    state: restarted
+  when: is_lens_node | default(false)
