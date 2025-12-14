@@ -1,0 +1,45 @@
+# Grafana Contact Points for CIRISLens Alerting
+# Configure notification destinations for alerts
+
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: ciris-ops
+    receivers:
+      # Discord webhook for alerts
+      - uid: discord-receiver
+        type: discord
+        settings:
+          url: https://discord.com/api/webhooks/1449073979196440781/S6EbCDjOYbmUA6srOxWEWZqqM8MA6yD-6fxqCfOoFsK4AzHkHVu5PflLGyRHLo5tx7Bi
+          use_discord_username: true
+          avatar_url: https://grafana.com/static/assets/img/fav32.png
+          title: '{{ template "default.title" . }}'
+          message: '{{ template "default.message" . }}'
+        disableResolveMessage: false
+
+# Notification policies - route alerts to contact points
+policies:
+  - orgId: 1
+    receiver: ciris-ops
+    group_by:
+      - grafana_folder
+      - alertname
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+      # Critical alerts - immediate notification
+      - receiver: ciris-ops
+        matchers:
+          - severity = critical
+        group_wait: 0s
+        group_interval: 1m
+        repeat_interval: 1h
+      # Warning alerts - batched
+      - receiver: ciris-ops
+        matchers:
+          - severity = warning
+        group_wait: 1m
+        group_interval: 5m
+        repeat_interval: 4h

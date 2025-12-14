@@ -58,8 +58,8 @@ services:
 {% if lens_google_oauth_enabled | default(false) %}
       # Google OAuth
       GF_AUTH_GOOGLE_ENABLED: true
-      GF_AUTH_GOOGLE_CLIENT_ID: {{ google_client_id }}
-      GF_AUTH_GOOGLE_CLIENT_SECRET: {{ google_client_secret }}
+      GF_AUTH_GOOGLE_CLIENT_ID: {{ lens_google_client_id }}
+      GF_AUTH_GOOGLE_CLIENT_SECRET: {{ lens_google_client_secret }}
       GF_AUTH_GOOGLE_SCOPES: openid email profile
       GF_AUTH_GOOGLE_AUTH_URL: https://accounts.google.com/o/oauth2/auth
       GF_AUTH_GOOGLE_TOKEN_URL: https://oauth2.googleapis.com/token
@@ -91,7 +91,7 @@ services:
     container_name: cirislens-api
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://{{ lens_db_user | default('cirislens') }}:{{ lens_db_password }}@postgres:5432/{{ lens_db_name | default('cirislens') }}
+      DATABASE_URL: postgresql://{{ lens_db_user | default('cirislens') }}:{{ lens_db_password | regex_replace('/', '%2F') }}@postgres:5432/{{ lens_db_name | default('cirislens') }}
       ENV: production
       # OAuth for admin UI
       GOOGLE_CLIENT_ID: {{ google_client_id | default('') }}
@@ -101,9 +101,10 @@ services:
       SESSION_SECRET: {{ lens_session_secret }}
       # Collection settings
       COLLECTION_INTERVAL_SECONDS: {{ lens_collection_interval | default(30) }}
-      OTLP_COLLECTION_ENABLED: true
+      OTLP_COLLECTION_ENABLED: false
     volumes:
       - /var/log/ciris/lens:/app/logs
+      - ./sql:/app/sql:ro
     ports:
       - "127.0.0.1:8200:8000"
     networks:

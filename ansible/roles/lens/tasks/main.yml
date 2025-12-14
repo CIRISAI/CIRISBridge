@@ -23,6 +23,7 @@
         - /opt/ciris/lens/config
         - /opt/ciris/lens/config/grafana/provisioning/datasources
         - /opt/ciris/lens/config/grafana/provisioning/dashboards
+        - /opt/ciris/lens/config/grafana/provisioning/alerting
         - /opt/ciris/lens/dashboards
         - /opt/ciris/lens/sql
         - /var/log/ciris/lens
@@ -64,6 +65,20 @@
       ansible.builtin.template:
         src: grafana-dashboards.yml.j2
         dest: /opt/ciris/lens/config/grafana/provisioning/dashboards/dashboards.yml
+        mode: "0644"
+      notify: Restart CIRISLens
+
+    - name: Sync Grafana dashboard JSON files
+      ansible.builtin.copy:
+        src: dashboards/
+        dest: /opt/ciris/lens/dashboards/
+        mode: "0644"
+      notify: Restart CIRISLens
+
+    - name: Copy Grafana alerting provisioning
+      ansible.builtin.copy:
+        src: alerting/
+        dest: /opt/ciris/lens/config/grafana/provisioning/alerting/
         mode: "0644"
       notify: Restart CIRISLens
 

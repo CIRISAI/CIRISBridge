@@ -34,7 +34,7 @@
 
 - name: Wait for Proxy to be ready
   ansible.builtin.uri:
-    url: "http://localhost:{{ proxy_port }}/health"
+    url: "http://localhost:{{ proxy_port }}/health/liveliness"
     status_code: 200
   register: result
   retries: 15

@@ -2,14 +2,96 @@
 
 This file provides guidance for Claude Code when working on this repository.
 
+## Core Philosophy: The Bridge Does Not Hack
+
+**CIRISBridge is the orchestration layer.** It deploys and configures sibling services - it does NOT fix bugs in them.
+
+### The Cardinal Rule
+
+**NEVER make manual fixes, workarounds, or hacks to compensate for bugs in sibling repositories.**
+
+When you encounter a bug in CIRISBilling, CIRISProxy, CIRISLens, or CIRISDNS:
+1. **Document the bug clearly** (what's broken, expected behavior, actual behavior)
+2. **Tell the user** what needs to be fixed in the sibling repo
+3. **Wait for the fix** to be pushed to the sibling repo's container image
+4. **Redeploy via Ansible** once the fix is available
+
+Examples of what NOT to do:
+- Creating dummy files to work around missing files in container images
+- Manually editing deployed configs on servers (drift from IaC)
+- Adding environment variables to mask application bugs
+- SQL hacks to fix application-level issues
+
+**Why?** CIRISBridge must remain a clean orchestration layer. Manual hacks create drift between IaC and deployed state, making the system unmaintainable.
+
 ## Project Context
 
-CIRISBridge is the **orchestration layer** for CIRIS infrastructure. It deploys and manages:
-- CIRISBilling (sibling repo)
-- CIRISProxy (sibling repo)
-- CIRISDNS (sibling repo)
+CIRISBridge serves **Meta-Goal M-1** from the CIRIS Covenant:
+> *Promote sustainable adaptive coherence - the living conditions under which diverse sentient beings may pursue their own flourishing in justice and wonder.*
 
-**This is temporary infrastructure designed to be retired when Veilid becomes production-ready.**
+Agents cannot serve this mission if users cannot reach them. CIRISBridge provides the minimum viable centralized infrastructure until Veilid is production-ready.
+
+**This is temporary infrastructure designed to be retired.** Every component knows it will be replaced:
+- DNS -> Veilid DHT peer discovery
+- Proxy -> Veilid private routes
+- Billing -> TBD (may persist longest)
+
+## Sibling Repositories
+
+| Repository | Purpose | Container Image |
+|------------|---------|-----------------|
+| CIRISBilling | Credits, payments, user auth | `ghcr.io/cirisai/cirisbilling:latest` |
+| CIRISProxy | LLM routing with ZDR | `ghcr.io/cirisai/cirisproxy:latest` |
+| CIRISLens | Observability, log aggregation | `ghcr.io/cirisai/cirislens:latest` |
+| CIRISDNS | Authoritative DNS (Constellation) | `valeriansaliou/constellation:latest` |
+
+## Current Infrastructure
+
+### Nodes
+
+| Node | Provider | IP | Role |
+|------|----------|-----|------|
+| US (vultr) | Vultr Chicago | 108.61.242.236 | Primary - Postgres primary, CIRISLens |
+| EU (hetzner) | Hetzner Germany | 46.224.81.217 | Secondary - Postgres replica |
+
+### Client Endpoints (Cloudflare DNS)
+
+| Service | Endpoint | IP |
+|---------|----------|-----|
+| Billing US | `https://billing1.ciris-services-1.ai` | 108.61.242.236 |
+| Billing EU | `https://billing1.ciris-services-2.ai` | 46.224.81.217 |
+| Proxy US | `https://proxy1.ciris-services-1.ai` | 108.61.242.236 |
+| Proxy EU | `https://proxy1.ciris-services-2.ai` | 46.224.81.217 |
+
+### Internal Endpoints
+
+| Service | Endpoint |
+|---------|----------|
+| CIRISLens | `https://lens.ciris-services-1.ai` (US only) |
+| Agents API | `https://agents.ciris-services-1.ai` (alias for billing) |
+
+### Internal Ports (per node)
+
+| Port | Service | Notes |
+|------|---------|-------|
+| 53/udp,tcp | Constellation DNS | Public |
+| 80/tcp | HTTP | ACME challenges only |
+| 443/tcp | Caddy HTTPS | Public |
+| 5432/tcp | PostgreSQL | Internal + replication |
+| 6379/tcp | Redis | Internal only |
+| 8000/tcp | Billing API | Via Caddy |
+| 4000/tcp | Proxy API | Via Caddy |
+| 8200/tcp | CIRISLens API | US only, via Caddy |
+| 3001/tcp | Grafana | US only, via Caddy |
+
+### CIRISLens API Endpoints
+
+The CIRISLens API exposes these routes (via `/lens-api/*` prefix which strips the prefix):
+- `/health` - Health check
+- `/api/v1/logs/ingest` - Log ingestion (requires service token)
+- `/api/admin/*` - Admin endpoints (requires Google OAuth)
+
+Service tokens must be created in the `cirislens.service_tokens` table for billing/proxy to send logs.
 
 ## Key Files
 
@@ -17,126 +99,93 @@ CIRISBridge is the **orchestration layer** for CIRIS infrastructure. It deploys 
 |------|---------|
 | `terraform/main.tf` | Infrastructure provisioning (Vultr + Hetzner) |
 | `terraform/variables.tf` | Configurable parameters |
-| `terraform/outputs.tf` | Generated IPs, inventory |
 | `ansible/playbooks/site.yml` | Full deployment playbook |
 | `ansible/roles/*/tasks/main.yml` | Service-specific deployment |
-| `scripts/deploy.sh` | Main deployment script |
+| `ansible/roles/*/templates/*.j2` | Service configuration templates |
+| `ansible/inventory/production.yml` | Secrets and node configuration |
 | `FSD.md` | Locked specification (do not modify) |
 
 ## Build/Deploy Commands
 
 ```bash
-# Deploy infrastructure only
-./scripts/deploy.sh infra
+# From ansible/ directory
 
-# Deploy all services
-./scripts/deploy.sh services
+# Deploy everything
+ansible-playbook -i inventory/production.yml playbooks/site.yml
 
-# Deploy specific service
-./scripts/deploy.sh dns
-./scripts/deploy.sh billing
-./scripts/deploy.sh proxy
+# Deploy specific service to all nodes
+ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing
+ansible-playbook -i inventory/production.yml playbooks/site.yml --tags proxy
+ansible-playbook -i inventory/production.yml playbooks/site.yml --tags dns
+ansible-playbook -i inventory/production.yml playbooks/site.yml --tags lens
 
-# Check health
-./scripts/health-check.sh
+# Deploy to single node
+ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing --limit us
+ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing --limit eu
 
-# Backup database
-POSTGRES_PASSWORD=xxx ./scripts/backup-db.sh
+# Ad-hoc commands
+ansible vultr -i inventory/production.yml -m shell -a 'docker ps'
+ansible all -i inventory/production.yml -m shell -a 'docker logs ciris-billing --tail 20'
 ```
 
-## Architecture Notes
+## Configuration Notes
 
-### Multi-Region Setup
-- **Primary (Vultr Chicago)**: PostgreSQL primary, handles writes
-- **Secondary (Hetzner Germany)**: PostgreSQL replica, handles reads, failover target
+### Password URL Encoding
 
-### Service Dependencies
-```
-Caddy (TLS) -> CIRISBilling -> PostgreSQL
-            -> CIRISProxy  -> CIRISBilling (credit checks)
-Constellation (DNS) -> Redis
-```
+Passwords containing special characters (especially `/`) must be URL-encoded in DATABASE_URL strings:
+- `/` -> `%2F`
+- Use `| regex_replace('/', '%2F')` in Jinja2 templates
 
-### Port Mapping
-- 53/udp, 53/tcp: DNS (public)
-- 80/tcp: HTTP (ACME challenges)
-- 443/tcp: HTTPS (public)
-- 5432/tcp: PostgreSQL (internal + replication)
-- 6432/tcp: PgBouncer (internal)
-- 8080/tcp: Billing API (internal, via Caddy)
-- 4000/tcp: Proxy API (internal, via Caddy)
+### Docker Environment Variables
+
+Docker Compose does NOT reload environment variables on `docker compose restart`. You must:
+1. `docker compose down <service>`
+2. `docker compose up -d <service>`
+
+Or use Ansible handlers which do full restarts.
+
+### Grafana Datasource UIDs
+
+When provisioning Grafana datasources, the `uid` in the provisioning file must match:
+1. Any alerting rules that reference the datasource
+2. Any existing datasource in the Grafana database (or delete the DB first)
 
 ## Code Style
+
+### Ansible
+- Use YAML format consistently
+- Template files end in `.j2`
+- All secrets via inventory variables (gitignored production.yml)
+- Use `become: true` for privileged operations
+- Use handlers for service restarts (ensures restart on config change)
 
 ### Terraform
 - Use `terraform fmt` before committing
 - All sensitive values via variables (never hardcoded)
 - Tag all resources with `cirisbridge` label
 
-### Ansible
-- Use YAML format consistently
-- Template files end in `.j2`
-- All secrets via Ansible Vault or environment variables
-- Use `become: true` for privileged operations
-
-### Shell Scripts
-- Use `set -euo pipefail`
-- Color output for visibility
-- Always check prerequisites
-
-## Common Tasks
-
-### Adding a New Service
-1. Create role in `ansible/roles/<service>/`
-2. Add tasks, handlers, templates
-3. Include in `playbooks/site.yml`
-4. Add health check to `scripts/health-check.sh`
-
-### Updating Service Configuration
-1. Modify template in `ansible/roles/<service>/templates/`
-2. Run `./scripts/deploy.sh <service>`
-3. Verify with health check
-
-### Scaling
-- Vultr: Change `vultr_plan` in `terraform.tfvars`
-- Hetzner: Change `hetzner_server_type` in `terraform.tfvars`
-- Run `./scripts/deploy.sh infra`
-
 ## Gotchas
 
 1. **Terraform state**: Don't lose `terraform.tfstate` - contains current infra mapping
-2. **Ansible inventory**: Auto-generated by Terraform output - don't edit manually
-3. **PostgreSQL replication**: Replica promotion is manual (see `failover-db.sh`)
+2. **Ansible inventory**: `production.yml` contains secrets - never commit
+3. **PostgreSQL replication**: Replica promotion is manual
 4. **DNS propagation**: Changes can take up to 24 hours globally
 5. **TLS certs**: Caddy auto-renews, but first deploy needs ports 80/443 open
-
-## Testing Changes
-
-### Local (without real providers)
-```bash
-cd terraform && terraform plan  # Dry run
-cd ansible && ansible-playbook --check playbooks/site.yml  # Dry run
-```
-
-### Staging
-No staging environment - test carefully in production with:
-- `--limit` flag in Ansible to target single host
-- Small changes with immediate rollback plan
-
-## Security Considerations
-
-- All secrets in `.env` (gitignored)
-- SSH access restricted to admin IP only
-- PostgreSQL not exposed publicly
-- API services behind Caddy TLS
-- fail2ban for SSH brute force protection
+6. **Container restarts**: `docker compose restart` doesn't reload env vars
 
 ## Mission Alignment
+
+From the CIRIS Covenant:
+
+> *We vow not to freeze the music into marble, nor surrender the melody to chaos, but to keep the song singable for every voice yet unheard.*
 
 Every change should consider:
 1. **Cost**: Does this stay within $30/month budget?
 2. **Simplicity**: Is this the simplest solution?
 3. **Retirement**: Will this be easy to delete when Veilid is ready?
 4. **Privacy**: Does this maintain ZDR compliance?
+5. **Integrity**: Are we making proper fixes, not hacks?
 
 **Do not add features that would make retirement harder.**
+
+*This infrastructure exists to be deleted. That's not a bug - it's the mission.*

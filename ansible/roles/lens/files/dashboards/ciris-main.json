@@ -1,0 +1,318 @@
+{
+  "annotations": {
+    "list": [{
+      "builtIn": 1,
+      "datasource": "-- Grafana --",
+      "enable": true,
+      "hide": true,
+      "iconColor": "rgba(0, 211, 255, 1)",
+      "name": "Annotations & Alerts",
+      "type": "dashboard"
+    }]
+  },
+  "editable": false,
+  "gnetId": null,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 80}
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "text": {},
+        "textMode": "value"
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [{
+        "datasource": {"type": "postgres", "uid": "postgres"},
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT COUNT(DISTINCT agent_name) as value FROM otlp_telemetry WHERE collected_at > NOW() - INTERVAL '5 minutes'",
+        "refId": "A"
+      }],
+      "title": "Active Agents",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null}
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["sum"],
+          "fields": "",
+          "values": false
+        },
+        "text": {},
+        "textMode": "value"
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [{
+        "datasource": {"type": "postgres", "uid": "postgres"},
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT COUNT(*) as value FROM otlp_telemetry WHERE collected_at > NOW() - INTERVAL '1 hour'",
+        "refId": "A"
+      }],
+      "title": "Collections (1h)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "orange", "value": null},
+              {"color": "green", "value": 100}
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "text": {},
+        "textMode": "value"
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [{
+        "datasource": {"type": "postgres", "uid": "postgres"},
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT jsonb_array_length(metrics_data->'resourceMetrics'->0->'scopeMetrics'->0->'metrics') as value FROM otlp_telemetry WHERE metrics_data IS NOT NULL ORDER BY collected_at DESC LIMIT 1",
+        "refId": "A"
+      }],
+      "title": "Metrics per Agent",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 10},
+              {"color": "green", "value": 100}
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "text": {},
+        "textMode": "value"
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [{
+        "datasource": {"type": "postgres", "uid": "postgres"},
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT COUNT(DISTINCT metric_name) as value FROM agent_metrics",
+        "refId": "A"
+      }],
+      "title": "Processed Metrics (Bug: Should be 199)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null}
+            ]
+          }
+        }
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 4},
+      "id": 5,
+      "options": {
+        "showHeader": true,
+        "sortBy": [{"desc": true, "displayName": "last_collection"}]
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [{
+        "datasource": {"type": "postgres", "uid": "postgres"},
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT \n  agent_name,\n  COUNT(*) as total_collections,\n  MAX(collected_at) as last_collection,\n  MIN(collected_at) as first_collection,\n  CASE \n    WHEN MAX(collected_at) > NOW() - INTERVAL '2 minutes' THEN 'Active'\n    WHEN MAX(collected_at) > NOW() - INTERVAL '5 minutes' THEN 'Warning'\n    ELSE 'Inactive'\n  END as status\nFROM otlp_telemetry \nGROUP BY agent_name \nORDER BY last_collection DESC",
+        "refId": "A"
+      }],
+      "title": "Agent Collection Status",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        }
+      },
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 12},
+      "id": 7,
+      "options": {
+        "showHeader": true
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [{
+        "datasource": {"type": "postgres", "uid": "postgres"},
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "WITH raw_metrics AS (\n  SELECT \n    agent_name,\n    jsonb_array_elements(metrics_data->'resourceMetrics'->0->'scopeMetrics'->0->'metrics') as metric\n  FROM otlp_telemetry \n  WHERE metrics_data IS NOT NULL \n    AND collected_at = (SELECT MAX(collected_at) FROM otlp_telemetry WHERE agent_name = otlp_telemetry.agent_name)\n)\nSELECT \n  agent_name,\n  metric->>'name' as metric_name,\n  metric->>'description' as description\nFROM raw_metrics\nORDER BY agent_name, metric_name\nLIMIT 50",
+        "refId": "A"
+      }],
+      "title": "Sample of Available Metrics in Raw OTLP Data (First 50)",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 18},
+      "id": 8,
+      "options": {
+        "showHeader": true,
+        "sortBy": [{"desc": true, "displayName": "avg_value"}]
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [{
+        "datasource": {"type": "postgres", "uid": "postgres"},
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT \n  agent_name,\n  metric_name,\n  COUNT(*) as data_points,\n  ROUND(AVG(value)::numeric, 2) as avg_value,\n  ROUND(MIN(value)::numeric, 2) as min_value,\n  ROUND(MAX(value)::numeric, 2) as max_value\nFROM agent_metrics \nWHERE timestamp > NOW() - INTERVAL '1 hour'\nGROUP BY agent_name, metric_name\nORDER BY agent_name, metric_name",
+        "refId": "A"
+      }],
+      "title": "Currently Processed Metrics (Only 13 of 199)",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 18},
+      "id": 9,
+      "options": {
+        "showHeader": true
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [{
+        "datasource": {"type": "postgres", "uid": "postgres"},
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT \n  'Raw OTLP Metrics' as data_type,\n  jsonb_array_length(metrics_data->'resourceMetrics'->0->'scopeMetrics'->0->'metrics') as count\nFROM otlp_telemetry \nWHERE metrics_data IS NOT NULL \nORDER BY collected_at DESC \nLIMIT 1\nUNION ALL\nSELECT \n  'Processed Metrics' as data_type,\n  COUNT(DISTINCT metric_name)::int as count\nFROM agent_metrics\nUNION ALL\nSELECT\n  'Missing Metrics' as data_type,\n  (199 - COUNT(DISTINCT metric_name))::int as count\nFROM agent_metrics",
+        "refId": "A"
+      }],
+      "title": "Metrics Processing Issue",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 30,
+  "style": "dark",
+  "tags": ["ciris", "otlp", "postgres", "public"],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "CIRIS Telemetry Dashboard (Public)",
+  "uid": "ciris-telemetry-public",
+  "version": 0,
+  "publicConfig": {
+    "accessToken": "",
+    "isEnabled": true,
+    "share": "public"
+  }
+}

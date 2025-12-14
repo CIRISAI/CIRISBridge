@@ -28,7 +28,12 @@ billing1.{{ dns_soa }} {
 
 # LLM Proxy
 proxy1.{{ dns_soa }} {
+{% if proxy_enabled | default(true) %}
     reverse_proxy ciris-proxy:{{ proxy_port }}
+{% else %}
+    # Proxy disabled via proxy_enabled=false
+    respond "Service temporarily unavailable" 503
+{% endif %}
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -60,13 +65,16 @@ agents.{{ dns_soa }} {
 
 # CIRISLens - Observability (US node only)
 lens.{{ dns_soa }} {
-    # API routes (log ingestion, admin)
-    handle /api/* {
-        uri strip_prefix /api
+    # CIRISLens API routes (log ingestion, admin) - specific paths only
+    handle /ingest/* {
+        reverse_proxy cirislens-api:8000
+    }
+    handle /lens-api/* {
+        uri strip_prefix /lens-api
         reverse_proxy cirislens-api:8000
     }
 
-    # Grafana dashboards (default)
+    # Everything else goes to Grafana (including /api for Grafana's own API)
     handle {
         reverse_proxy cirislens-grafana:3000
     }

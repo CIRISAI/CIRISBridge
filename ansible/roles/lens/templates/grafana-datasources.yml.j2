@@ -4,13 +4,14 @@ apiVersion: 1
 
 datasources:
   - name: TimescaleDB
-    type: postgres
+    uid: postgresql
+    type: grafana-postgresql-datasource
     url: postgres:5432
-    database: {{ lens_db_name | default('cirislens') }}
     user: {{ lens_db_user | default('cirislens') }}
     secureJsonData:
       password: {{ lens_db_password }}
     jsonData:
+      database: {{ lens_db_name | default('cirislens') }}
       sslmode: disable
       maxOpenConns: 10
       maxIdleConns: 5

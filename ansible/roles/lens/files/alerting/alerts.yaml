@@ -1,0 +1,211 @@
+# Grafana Alerting Configuration for CIRISLens
+# Alert rules for monitoring service errors
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: CIRIS Service Alerts
+    folder: CIRIS Alerts
+    interval: 1m
+    rules:
+      # Alert when any service has errors in the last 5 minutes
+      - uid: service-errors-alert
+        title: Service Errors Detected
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: postgresql
+            model:
+              rawSql: |
+                SELECT
+                  NOW() as time,
+                  COUNT(*) as value
+                FROM cirislens.service_logs
+                WHERE level IN ('ERROR', 'CRITICAL')
+                  AND timestamp > NOW() - INTERVAL '5 minutes'
+                  AND message NOT LIKE '%play_integrity%'
+              format: table
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              type: threshold
+        noDataState: NoData
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: "Service errors detected in CIRIS infrastructure"
+          description: "One or more CIRIS services have logged ERROR or CRITICAL level messages in the last 5 minutes (excludes Play Integrity errors)."
+          runbook_url: "https://lens.ciris-services-1.ai/d/error-correlation/error-correlation"
+        labels:
+          severity: warning
+        isPaused: false
+
+      # Alert when error rate is high (5+ errors in 5 minutes)
+      - uid: high-error-rate-alert
+        title: High Error Rate
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: postgresql
+            model:
+              rawSql: |
+                SELECT
+                  NOW() as time,
+                  COUNT(*) as value
+                FROM cirislens.service_logs
+                WHERE level IN ('ERROR', 'CRITICAL')
+                  AND timestamp > NOW() - INTERVAL '5 minutes'
+                  AND message NOT LIKE '%play_integrity%'
+              format: table
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 5
+                    type: gt
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              type: threshold
+        noDataState: NoData
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: "High error rate detected"
+          description: "More than 5 errors detected in the last 5 minutes across CIRIS services (excludes Play Integrity errors)."
+          runbook_url: "https://lens.ciris-services-1.ai/d/error-correlation/error-correlation"
+        labels:
+          severity: critical
+        isPaused: false
+
+      # Alert when a specific service has errors
+      - uid: billing-errors-alert
+        title: Billing Service Errors
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: postgresql
+            model:
+              rawSql: |
+                SELECT
+                  NOW() as time,
+                  COUNT(*) as value
+                FROM cirislens.service_logs
+                WHERE service_name = 'cirisbilling'
+                  AND level IN ('ERROR', 'CRITICAL')
+                  AND timestamp > NOW() - INTERVAL '5 minutes'
+                  AND message NOT LIKE '%play_integrity%'
+              format: table
+          - refId: B
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              type: threshold
+        noDataState: NoData
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: "Billing service errors detected"
+          description: "The billing service (cirisbilling) has logged errors. This may affect payment processing."
+          runbook_url: "https://lens.ciris-services-1.ai/d/billing-analytics/billing-analytics"
+        labels:
+          severity: critical
+          service: billing
+        isPaused: false

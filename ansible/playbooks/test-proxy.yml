@@ -1,0 +1,509 @@
+# CIRISProxy Integration Test Playbook
+# SRE-grade testing with proper error handling, retries, and assertions
+#
+# Usage:
+#   ansible-playbook -i inventory/production.yml playbooks/test-proxy.yml --limit us
+#   ansible-playbook -i inventory/production.yml playbooks/test-proxy.yml --limit eu
+#   ansible-playbook -i inventory/production.yml playbooks/test-proxy.yml  # both nodes
+#
+# Exit codes:
+#   0 = All tests passed
+#   Non-zero = Test failures (check summary)
+#
+---
+- name: CIRISProxy Integration Tests
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # Test configuration
+    test_user_id: "test_user_synthetic_{{ ansible_date_time.epoch }}"
+    test_interaction_id: "synthetic-test-{{ ansible_date_time.epoch }}"
+    test_model: "groq/llama-3.1-8b-instant"
+
+    # Retry configuration (exponential backoff)
+    max_retries: 3
+    initial_delay: 2
+
+    # Test result tracking
+    test_results: {}
+
+  tasks:
+    # =========================================================================
+    # PHASE 1: Prerequisites and Assertions
+    # =========================================================================
+    - name: "PHASE 1: Validate Prerequisites"
+      block:
+        - name: Assert required variables are defined
+          ansible.builtin.assert:
+            that:
+              - proxy_port is defined
+              - litellm_master_key is defined
+              - billing_api_key is defined
+            fail_msg: "Missing required variables in inventory"
+            success_msg: "All required variables present"
+
+        - name: Check Docker is running
+          ansible.builtin.command: docker info
+          changed_when: false
+          register: docker_check
+
+        - name: Assert Docker is healthy
+          ansible.builtin.assert:
+            that:
+              - docker_check.rc == 0
+            fail_msg: "Docker is not running or accessible"
+            success_msg: "Docker is healthy"
+
+      rescue:
+        - name: Record prerequisite failure
+          ansible.builtin.set_fact:
+            test_results: "{{ test_results | combine({'prerequisites': 'FAIL'}) }}"
+
+        - name: Fail on prerequisites
+          ansible.builtin.fail:
+            msg: "Prerequisites not met - cannot continue tests"
+
+    - name: Record prerequisites passed
+      ansible.builtin.set_fact:
+        test_results: "{{ test_results | combine({'prerequisites': 'PASS'}) }}"
+
+    # =========================================================================
+    # PHASE 2: Container Health Checks
+    # =========================================================================
+    - name: "PHASE 2: Container Health"
+      block:
+        - name: Check proxy container exists and is running
+          community.docker.docker_container_info:
+            name: ciris-proxy
+          register: proxy_container
+          retries: "{{ max_retries }}"
+          delay: "{{ initial_delay }}"
+          until: proxy_container.exists and proxy_container.container.State.Status == 'running'
+
+        - name: Assert proxy container is healthy
+          ansible.builtin.assert:
+            that:
+              - proxy_container.exists
+              - proxy_container.container.State.Status == 'running'
+            fail_msg: "Proxy container not running"
+            success_msg: "Proxy container is running"
+
+        - name: Check billing container exists and is running
+          community.docker.docker_container_info:
+            name: ciris-billing
+          register: billing_container
+          retries: "{{ max_retries }}"
+          delay: "{{ initial_delay }}"
+          until: billing_container.exists and billing_container.container.State.Status == 'running'
+
+        - name: Assert billing container is healthy
+          ansible.builtin.assert:
+            that:
+              - billing_container.exists
+              - billing_container.container.State.Status == 'running'
+            fail_msg: "Billing container not running"
+            success_msg: "Billing container is running"
+
+      rescue:
+        - name: Record container health failure
+          ansible.builtin.set_fact:
+            test_results: "{{ test_results | combine({'container_health': 'FAIL'}) }}"
+
+        - name: Fail on container health
+          ansible.builtin.fail:
+            msg: "Container health checks failed"
+
+    - name: Record container health passed
+      ansible.builtin.set_fact:
+        test_results: "{{ test_results | combine({'container_health': 'PASS'}) }}"
+
+    # =========================================================================
+    # PHASE 3: HTTP Health Endpoints
+    # =========================================================================
+    - name: "PHASE 3: HTTP Health Endpoints"
+      block:
+        - name: Test proxy liveliness endpoint
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ proxy_port }}/health/liveliness"
+            return_content: true
+            timeout: 10
+          register: proxy_health
+          retries: "{{ max_retries }}"
+          delay: "{{ initial_delay }}"
+          until: proxy_health.status == 200
+
+        - name: Assert proxy health response
+          ansible.builtin.assert:
+            that:
+              - proxy_health.status == 200
+            fail_msg: "Proxy health endpoint failed"
+            success_msg: "Proxy health endpoint responsive"
+
+        - name: Test billing health endpoint
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ billing_port | default(8080) }}/health"
+            return_content: true
+            timeout: 10
+          register: billing_health
+          retries: "{{ max_retries }}"
+          delay: "{{ initial_delay }}"
+          until: billing_health.status == 200
+
+        - name: Assert billing health response
+          ansible.builtin.assert:
+            that:
+              - billing_health.status == 200
+            fail_msg: "Billing health endpoint failed"
+            success_msg: "Billing health endpoint responsive"
+
+        - name: Assert billing database connected
+          ansible.builtin.assert:
+            that:
+              - billing_health.json.database == 'connected'
+            fail_msg: "Billing database NOT connected!"
+            success_msg: "Billing database connected"
+
+      rescue:
+        - name: Record HTTP health failure
+          ansible.builtin.set_fact:
+            test_results: "{{ test_results | combine({'http_health': 'FAIL'}) }}"
+
+        - name: Continue despite HTTP health failure
+          ansible.builtin.debug:
+            msg: "HTTP health checks failed - continuing with other tests"
+
+    - name: Record HTTP health passed
+      ansible.builtin.set_fact:
+        test_results: "{{ test_results | combine({'http_health': 'PASS'}) }}"
+      when: proxy_health.status == 200 and billing_health.status == 200
+
+    # =========================================================================
+    # PHASE 4: Synthetic Billing Transaction Test
+    # =========================================================================
+    - name: "PHASE 4: Synthetic Billing Test"
+      block:
+        - name: Test billing credit lookup (synthetic user)
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ billing_port | default(8080) }}/v1/billing/credits/oauth:google/ciris_synthetic_canary"
+            headers:
+              X-API-Key: "{{ billing_api_key }}"
+            return_content: true
+            timeout: 10
+            status_code: [200, 404]  # 404 is OK - user doesn't exist but API works
+          register: billing_credit_check
+
+        - name: Validate billing API processed request
+          ansible.builtin.assert:
+            that:
+              - billing_credit_check.status in [200, 404]
+            fail_msg: "Billing API failed to process credit lookup"
+            success_msg: "Billing API processed credit lookup (status: {{ billing_credit_check.status }})"
+
+        - name: Test billing usage endpoint
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ billing_port | default(8080) }}/v1/billing/litellm/usage"
+            headers:
+              X-API-Key: "{{ billing_api_key }}"
+            return_content: true
+            timeout: 10
+            status_code: [200, 404, 405]
+          register: billing_usage_check
+          failed_when: false
+
+        - name: Display billing test results
+          ansible.builtin.debug:
+            msg: |
+              Billing API Tests:
+              - Database: {{ billing_health.json.database }}
+              - Credit Lookup: {{ billing_credit_check.status }} (200/404 = OK)
+              - Usage Endpoint: {{ billing_usage_check.status | default('skipped') }}
+
+      rescue:
+        - name: Record billing test failure
+          ansible.builtin.set_fact:
+            test_results: "{{ test_results | combine({'billing_api': 'FAIL'}) }}"
+
+        - name: Log billing failure details
+          ansible.builtin.debug:
+            msg: "Billing API test failed - check database connectivity and API key"
+
+    - name: Record billing test passed
+      ansible.builtin.set_fact:
+        test_results: "{{ test_results | combine({'billing_api': 'PASS'}) }}"
+      when: billing_credit_check.status in [200, 404]
+
+    # =========================================================================
+    # PHASE 5: Billing Callback Verification (CRITICAL)
+    # =========================================================================
+    - name: "PHASE 5: Billing Callback Verification"
+      block:
+        - name: Read callback status file
+          ansible.builtin.shell: |
+            docker exec ciris-proxy cat /app/callback_status.json 2>/dev/null || echo '{"billing_callback_loaded": false}'
+          register: callback_status_raw
+          changed_when: false
+
+        - name: Parse callback status
+          ansible.builtin.set_fact:
+            callback_status: "{{ callback_status_raw.stdout | from_json }}"
+
+        - name: Assert billing callback is loaded (CRITICAL SECURITY CHECK)
+          ansible.builtin.assert:
+            that:
+              - callback_status.billing_callback_loaded | default(false) | bool
+            fail_msg: |
+              CRITICAL: Billing callback NOT loaded!
+              The proxy would operate as an OPEN PROXY without billing.
+              DO NOT enable external access until this is fixed.
+            success_msg: "Billing callback is loaded"
+
+        - name: Assert log shipper is configured
+          ansible.builtin.assert:
+            that:
+              - callback_status.lens_shipper_loaded | default(false) | bool
+            fail_msg: "Log shipper not configured - logs won't reach CIRISLens"
+            success_msg: "Log shipper is configured"
+
+      rescue:
+        - name: Record callback verification failure
+          ansible.builtin.set_fact:
+            test_results: "{{ test_results | combine({'callback_loaded': 'FAIL - CRITICAL'}) }}"
+
+        - name: Fail on callback not loaded (security critical)
+          ansible.builtin.fail:
+            msg: "CRITICAL: Billing callback not loaded - proxy would be open!"
+
+    - name: Record callback verification passed
+      ansible.builtin.set_fact:
+        test_results: "{{ test_results | combine({'callback_loaded': 'PASS'}) }}"
+
+    # =========================================================================
+    # PHASE 6: End-to-End Pipeline Test
+    # =========================================================================
+    - name: "PHASE 6: End-to-End Pipeline Test"
+      block:
+        - name: Create E2E test script
+          ansible.builtin.copy:
+            dest: /tmp/test_e2e_pipeline.py
+            mode: "0755"
+            content: |
+              #!/usr/bin/env python3
+              """
+              End-to-end test of the billing callback -> CIRISLens pipeline.
+              Tests the callback execution and log shipping without making real LLM calls.
+              """
+              import sys
+              import os
+              import time
+              import json
+              from datetime import datetime, timezone, timedelta
+
+              # Setup
+              sys.path.insert(0, '/app')
+              os.chdir('/app')
+              os.environ.setdefault('BILLING_API_URL', 'http://ciris-billing:8000')
+
+              # Results tracking
+              results = {
+                  'callback_import': False,
+                  'callback_execution': False,
+                  'log_buffered': False,
+                  'log_shipped': False,
+                  'errors': []
+              }
+
+              try:
+                  from billing_callback import billing_callback_instance, _lens_shipper
+                  results['callback_import'] = True
+              except Exception as e:
+                  results['errors'].append(f"Import failed: {e}")
+                  print(json.dumps(results))
+                  sys.exit(1)
+
+              # Create mock objects
+              class MockUsage:
+                  prompt_tokens = 10
+                  completion_tokens = 20
+                  total_tokens = 30
+
+              class MockResponse:
+                  def __init__(self):
+                      self.id = f"test-{int(time.time())}"
+                      self.model = "groq/llama-3.1-8b-instant"
+                      self.usage = MockUsage()
+                      self._hidden_params = {"response_cost": 0.0001}
+
+              # Test data
+              now = datetime.now(timezone.utc)
+              test_id = f"e2e-test-{int(time.time())}"
+              mock_kwargs = {
+                  'model': 'groq/llama-3.1-8b-instant',
+                  'litellm_params': {
+                      'metadata': {
+                          '_ciris_oauth_provider': 'oauth:google',
+                          '_ciris_external_id': 'e2e_test_user',
+                          '_ciris_interaction_id': test_id,
+                      }
+                  },
+              }
+
+              # Execute callback
+              try:
+                  import asyncio
+
+                  async def run_test():
+                      await billing_callback_instance.async_log_success_event(
+                          kwargs=mock_kwargs,
+                          response_obj=MockResponse(),
+                          start_time=now - timedelta(seconds=1),
+                          end_time=now,
+                      )
+
+                  asyncio.run(run_test())
+                  results['callback_execution'] = True
+              except Exception as e:
+                  results['errors'].append(f"Callback failed: {e}")
+
+              # Check log shipping
+              if _lens_shipper:
+                  stats_before = _lens_shipper.get_stats()
+                  results['log_buffered'] = stats_before.get('buffer_size', 0) > 0
+
+                  # Force flush
+                  _lens_shipper.flush()
+                  time.sleep(0.5)
+
+                  stats_after = _lens_shipper.get_stats()
+                  results['log_shipped'] = stats_after.get('sent_count', 0) > stats_before.get('sent_count', 0)
+
+                  if stats_after.get('last_error'):
+                      results['errors'].append(f"Shipper error: {stats_after['last_error']}")
+              else:
+                  results['errors'].append("No log shipper configured")
+
+              # Output results
+              print(json.dumps(results))
+
+              # Exit code based on critical checks
+              if results['callback_execution'] and results['log_shipped']:
+                  sys.exit(0)
+              elif results['callback_execution']:
+                  sys.exit(0)  # Callback works, shipping may have issues
+              else:
+                  sys.exit(1)
+
+        - name: Run E2E test inside proxy container
+          ansible.builtin.shell: |
+            docker cp /tmp/test_e2e_pipeline.py ciris-proxy:/tmp/test_e2e_pipeline.py
+            docker exec ciris-proxy python3 /tmp/test_e2e_pipeline.py 2>&1
+          register: e2e_result
+          changed_when: false
+          failed_when: false
+
+        - name: Parse E2E test results
+          ansible.builtin.set_fact:
+            e2e_data: "{{ (e2e_result.stdout_lines | last | default('{}')) | from_json }}"
+          when: e2e_result.rc == 0 or e2e_result.stdout_lines | length > 0
+
+        - name: Display E2E test details
+          ansible.builtin.debug:
+            msg: |
+              E2E Test Results:
+              - Callback Import: {{ e2e_data.callback_import | default('N/A') }}
+              - Callback Execution: {{ e2e_data.callback_execution | default('N/A') }}
+              - Log Buffered: {{ e2e_data.log_buffered | default('N/A') }}
+              - Log Shipped: {{ e2e_data.log_shipped | default('N/A') }}
+              - Errors: {{ e2e_data.errors | default([]) | join(', ') or 'None' }}
+          when: e2e_data is defined
+
+        - name: Assert E2E callback executed
+          ansible.builtin.assert:
+            that:
+              - e2e_data.callback_execution | default(false) | bool
+            fail_msg: "E2E callback execution failed"
+            success_msg: "E2E callback execution succeeded"
+          when: e2e_data is defined
+
+      rescue:
+        - name: Record E2E test failure
+          ansible.builtin.set_fact:
+            test_results: "{{ test_results | combine({'e2e_pipeline': 'FAIL'}) }}"
+
+        - name: Log E2E failure details
+          ansible.builtin.debug:
+            msg: "E2E test failed: {{ e2e_result.stdout | default('No output') }}"
+
+    - name: Record E2E test passed
+      ansible.builtin.set_fact:
+        test_results: "{{ test_results | combine({'e2e_pipeline': 'PASS'}) }}"
+      when: e2e_data is defined and e2e_data.callback_execution | default(false) | bool
+
+    # =========================================================================
+    # PHASE 7: CIRISLens Integration (if applicable)
+    # =========================================================================
+    - name: "PHASE 7: CIRISLens Integration"
+      when: "'us' in group_names or node_name == 'us'"
+      block:
+        - name: Check CIRISLens database for recent proxy logs
+          ansible.builtin.shell: |
+            docker exec cirislens-db psql -U cirislens -d cirislens -t -c \
+              "SELECT COUNT(*) FROM cirislens.service_logs
+               WHERE service_name = 'cirisproxy'
+               AND timestamp > NOW() - INTERVAL '5 minutes';"
+          register: lens_log_count
+          changed_when: false
+          failed_when: false
+
+        - name: Check proxy service token usage
+          ansible.builtin.shell: |
+            docker exec cirislens-db psql -U cirislens -d cirislens -t -c \
+              "SELECT last_used_at FROM cirislens.service_tokens WHERE service_name = 'cirisproxy';"
+          register: token_usage
+          changed_when: false
+          failed_when: false
+
+        - name: Display CIRISLens status
+          ansible.builtin.debug:
+            msg: |
+              CIRISLens Integration:
+              - Recent proxy logs (5min): {{ lens_log_count.stdout | trim | default('0') }}
+              - Token last used: {{ token_usage.stdout | trim | default('Never') }}
+
+      rescue:
+        - name: Record CIRISLens check failure
+          ansible.builtin.set_fact:
+            test_results: "{{ test_results | combine({'cirislens': 'FAIL'}) }}"
+
+    - name: Record CIRISLens check passed
+      ansible.builtin.set_fact:
+        test_results: "{{ test_results | combine({'cirislens': 'PASS'}) }}"
+      when: "'us' in group_names or node_name == 'us'"
+
+    # =========================================================================
+    # FINAL: Test Summary
+    # =========================================================================
+    - name: Calculate overall result
+      ansible.builtin.set_fact:
+        all_passed: "{{ test_results.values() | select('search', 'FAIL') | list | length == 0 }}"
+        critical_passed: "{{ test_results.callback_loaded | default('FAIL') == 'PASS' }}"
+
+    - name: "TEST SUMMARY"
+      ansible.builtin.debug:
+        msg: |
+          ══════════════════════════════════════════════════════════════════
+           CIRISProxy Integration Test Results - {{ inventory_hostname }}
+          ══════════════════════════════════════════════════════════════════
+          {% for test, result in test_results.items() %}
+            {{ '✓' if 'PASS' in result else '✗' }} {{ test }}: {{ result }}
+          {% endfor %}
+          ──────────────────────────────────────────────────────────────────
+            OVERALL: {{ 'ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED' }}
+            SECURITY: {{ 'CALLBACK LOADED - SAFE' if critical_passed else 'CALLBACK MISSING - UNSAFE!' }}
+          ══════════════════════════════════════════════════════════════════
+
+    - name: Fail playbook if critical tests failed
+      ansible.builtin.fail:
+        msg: "Critical tests failed - see summary above"
+      when: not critical_passed

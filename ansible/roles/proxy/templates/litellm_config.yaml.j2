@@ -2,15 +2,15 @@
 # ZDR (Zero Data Retention) providers prioritized
 
 model_list:
-  # Default fast model - Groq Llama 4
+  # Default fast model - Groq Llama 3.3
   - model_name: default
     litellm_params:
-      model: groq/llama-4-maverick-17b-128e-instruct
+      model: groq/llama-3.3-70b-versatile
       api_key: os.environ/GROQ_API_KEY
 
   - model_name: fast
     litellm_params:
-      model: groq/llama-4-maverick-17b-128e-instruct
+      model: groq/llama-3.1-8b-instant
       api_key: os.environ/GROQ_API_KEY
 
   # Together AI models (ZDR)
@@ -30,11 +30,6 @@ model_list:
       api_key: os.environ/TOGETHER_API_KEY
 
   # Groq models (fast inference)
-  - model_name: groq/llama-4-maverick-17b-128e-instruct
-    litellm_params:
-      model: groq/llama-4-maverick-17b-128e-instruct
-      api_key: os.environ/GROQ_API_KEY
-
   - model_name: groq/llama-3.3-70b-versatile
     litellm_params:
       model: groq/llama-3.3-70b-versatile
@@ -51,11 +46,15 @@ litellm_settings:
   num_retries: 2
   request_timeout: 120
   telemetry: false
+  # Custom callbacks for billing integration
+  callbacks:
+    - billing_callback.billing_callback_instance
+  success_callback:
+    - billing_callback.billing_callback_instance
+  failure_callback:
+    - billing_callback.billing_callback_instance
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   disable_spend_logs: true  # ZDR compliance
-
-# Custom callbacks for billing integration
-callbacks:
-  - hooks.billing_callback.billing_callback_instance
+  custom_auth: custom_auth.user_api_key_auth
