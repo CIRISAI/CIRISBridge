@@ -128,6 +128,61 @@ ansible vultr -i inventory/production.yml -m shell -a 'docker ps'
 ansible all -i inventory/production.yml -m shell -a 'docker logs ciris-billing --tail 20'
 ```
 
+## SRE Runbooks
+
+Operational runbooks for incident response and infrastructure management are in `ansible/runbooks/`.
+
+### Available Runbooks
+
+| Runbook | Purpose |
+|---------|---------|
+| `incident-response.yml` | General incident management with diagnose, fix, escalate, close phases |
+| `intrusion-response.yml` | Security incident handling with IP blocking and forensics collection |
+| `provider-outage.yml` | Cloud provider failover/failback with DNS update guidance |
+| `add-region.yml` | New region provisioning checklist |
+| `remove-region.yml` | Region decommissioning with data archival |
+
+### Common Runbook Commands
+
+```bash
+# From ansible/ directory
+
+# General Incident Response
+ansible-playbook -i inventory/production.yml runbooks/incident-response.yml -e "severity=P1"
+ansible-playbook -i inventory/production.yml runbooks/incident-response.yml --tags diagnose
+ansible-playbook -i inventory/production.yml runbooks/incident-response.yml --tags fix -e "fix_action=restart_all"
+ansible-playbook -i inventory/production.yml runbooks/incident-response.yml --tags close -e "resolution='Fixed by restarting service'"
+
+# Provider Outage (detect, failover, failback)
+ansible-playbook -i inventory/production.yml runbooks/provider-outage.yml --tags detect
+ansible-playbook -i inventory/production.yml runbooks/provider-outage.yml --tags failover -e "failed_region=us"
+ansible-playbook -i inventory/production.yml runbooks/provider-outage.yml --tags failback -e "recovered_region=us"
+
+# Security Incident
+ansible-playbook -i inventory/production.yml runbooks/intrusion-response.yml --limit vultr
+ansible-playbook -i inventory/production.yml runbooks/intrusion-response.yml -e "block_ip=1.2.3.4"
+
+# Region Management
+ansible-playbook -i inventory/production.yml runbooks/add-region.yml -e "new_region=ap"
+ansible-playbook -i inventory/production.yml runbooks/remove-region.yml -e "region=eu"
+ansible-playbook -i inventory/production.yml runbooks/remove-region.yml -e "region=eu" -e "force=true"
+```
+
+### Severity Levels
+
+| Level | Description | Response |
+|-------|-------------|----------|
+| P1 | Critical: Complete outage, revenue impact | Immediate escalation, all hands |
+| P2 | High: Major feature unavailable | Primary + backup on-call |
+| P3 | Medium: Minor issue, workaround available | Primary on-call only |
+| P4 | Low: Cosmetic, no user impact | Next business day |
+
+### Runbook Outputs
+
+- **Forensics**: `./forensics/` - Evidence archives from intrusion response
+- **Incidents**: `./incidents/` - Incident reports and summaries
+- **Archives**: `./archives/` - Data archives from region removal
+
 ## Configuration Notes
 
 ### Password URL Encoding
