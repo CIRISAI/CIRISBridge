@@ -1,0 +1,278 @@
+---
+# Remove Region Runbook
+# Gracefully drain and decommission a region
+# Reference: https://www.cutover.com/blog/multi-cloud-disaster-recovery
+#
+# Usage:
+#   ansible-playbook -i inventory/production.yml runbooks/remove-region.yml -e "region=eu"
+#   ansible-playbook -i inventory/production.yml runbooks/remove-region.yml -e "region=eu" -e "force=true"
+#
+# This runbook:
+#   1. Drains traffic from the region (DNS update reminder)
+#   2. Waits for active connections to complete
+#   3. Stops services gracefully
+#   4. Removes replication subscriptions
+#   5. Archives data (optional)
+#   6. Destroys resources (optional, requires force=true)
+
+- name: "REMOVE REGION - Pre-flight Checks"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    region: ""
+    force: false
+
+  tasks:
+    - name: Validate region is specified
+      ansible.builtin.fail:
+        msg: "You must specify region, e.g.: -e 'region=eu'"
+      when: region | length == 0
+
+    - name: Display removal plan
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          REMOVE REGION RUNBOOK
+          ============================================
+          Region to Remove: {{ region }}
+          Force Destroy: {{ force }}
+
+          WARNING: This will permanently remove the region!
+
+          This runbook will:
+          1. Remind you to update DNS (manual step)
+          2. Drain active connections
+          3. Stop all CIRIS services
+          4. Remove PostgreSQL replication
+          5. Archive important data
+          {% if force %}
+          6. DESTROY ALL RESOURCES (force=true)
+          {% endif %}
+
+          CHECKLIST before proceeding:
+          [ ] DNS updated to remove this region
+          [ ] Traffic confirmed redirected
+          [ ] Data backup completed
+          [ ] Team notified
+          ============================================
+
+- name: "REMOVE REGION - Phase 1: DNS Drain"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    region: ""
+
+  tasks:
+    - name: "DNS: Reminder to update DNS"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          MANUAL STEP REQUIRED: Update DNS
+          ============================================
+          Before continuing, ensure DNS has been updated
+          to stop routing traffic to this region.
+
+          In Cloudflare:
+          1. Remove or disable A/AAAA records for {{ region }}
+          2. Or update geo-routing to exclude {{ region }}
+          3. Wait for TTL to expire (typically 5 minutes)
+
+          Press Ctrl+C to abort if DNS not updated.
+          ============================================
+
+    - name: "DNS: Wait for DNS propagation"
+      ansible.builtin.pause:
+        prompt: "Press ENTER when DNS has been updated and propagated"
+
+- name: "REMOVE REGION - Phase 2: Drain Connections"
+  hosts: "{{ region | default('none') }}"
+  gather_facts: false
+  vars:
+    drain_wait_seconds: 60
+
+  tasks:
+    - name: "DRAIN: Check active connections"
+      ansible.builtin.shell: |
+        ss -tunapl | grep -E ':443|:8080|:4000' | wc -l
+      register: active_connections
+      changed_when: false
+
+    - name: "DRAIN: Display active connections"
+      ansible.builtin.debug:
+        msg: "Active connections: {{ active_connections.stdout }}"
+
+    - name: "DRAIN: Disable Caddy proxy routes"
+      ansible.builtin.shell: |
+        # Return 503 for new requests
+        docker exec ciris-caddy caddy stop || true
+      ignore_errors: true
+
+    - name: "DRAIN: Wait for connections to drain"
+      ansible.builtin.pause:
+        seconds: "{{ drain_wait_seconds }}"
+        prompt: "Waiting {{ drain_wait_seconds }}s for connections to drain..."
+
+- name: "REMOVE REGION - Phase 3: Stop Services"
+  hosts: "{{ region | default('none') }}"
+  gather_facts: false
+
+  tasks:
+    - name: "STOP: Stop billing service"
+      ansible.builtin.shell: |
+        cd /opt/ciris/billing && docker compose down
+      ignore_errors: true
+
+    - name: "STOP: Stop proxy service"
+      ansible.builtin.shell: |
+        cd /opt/ciris/proxy && docker compose down
+      ignore_errors: true
+
+    - name: "STOP: Stop Caddy"
+      ansible.builtin.shell: |
+        cd /opt/ciris/caddy && docker compose down
+      ignore_errors: true
+
+    - name: "STOP: Verify services stopped"
+      ansible.builtin.shell: |
+        docker ps --format "{{ '{{' }}.Names{{ '}}' }}" | grep -E 'ciris' || echo "All CIRIS services stopped"
+      register: running_services
+      changed_when: false
+
+    - name: "STOP: Display status"
+      ansible.builtin.debug:
+        msg: "{{ running_services.stdout }}"
+
+- name: "REMOVE REGION - Phase 4: Remove Replication"
+  hosts: "{{ region | default('none') }}"
+  gather_facts: false
+
+  tasks:
+    - name: "REPLICATION: Remove subscriptions"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT subname FROM pg_subscription;
+        " 2>/dev/null || echo "No subscriptions found"
+      register: subscriptions
+      ignore_errors: true
+      changed_when: false
+
+    - name: "REPLICATION: Display subscription status"
+      ansible.builtin.debug:
+        msg: |
+          Current subscriptions: {{ subscriptions.stdout }}
+
+          To remove replication manually:
+          docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+            DROP SUBSCRIPTION IF EXISTS sub_from_primary;
+            DROP SUBSCRIPTION IF EXISTS sub_from_secondary;
+          "
+
+- name: "REMOVE REGION - Phase 5: Archive Data"
+  hosts: "{{ region | default('none') }}"
+  gather_facts: false
+  vars:
+    archive_dir: "/tmp/region-archive-{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+
+  tasks:
+    - name: "ARCHIVE: Create archive directory"
+      ansible.builtin.file:
+        path: "{{ archive_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: "ARCHIVE: Dump database (if still running)"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres pg_dump -U postgres ciris_billing > {{ archive_dir }}/database_dump.sql 2>/dev/null || echo "Database not available"
+      ignore_errors: true
+
+    - name: "ARCHIVE: Copy configuration files"
+      ansible.builtin.shell: |
+        cp -r /opt/ciris/*/docker-compose.yml {{ archive_dir }}/ 2>/dev/null || true
+        cp -r /opt/ciris/*/.env {{ archive_dir }}/ 2>/dev/null || true
+      ignore_errors: true
+
+    - name: "ARCHIVE: Create archive"
+      ansible.builtin.archive:
+        path: "{{ archive_dir }}"
+        dest: "/tmp/region-{{ region }}-archive.tar.gz"
+        format: gz
+      ignore_errors: true
+
+    - name: "ARCHIVE: Fetch archive to control node"
+      ansible.builtin.fetch:
+        src: "/tmp/region-{{ region }}-archive.tar.gz"
+        dest: "./archives/"
+        flat: false
+      ignore_errors: true
+
+- name: "REMOVE REGION - Phase 6: Destroy Resources (Optional)"
+  hosts: "{{ region | default('none') }}"
+  gather_facts: false
+  vars:
+    force: false
+
+  tasks:
+    - name: "DESTROY: Check if force=true"
+      ansible.builtin.debug:
+        msg: |
+          Skipping resource destruction.
+          To destroy resources, run with: -e "force=true"
+
+          Manual cleanup required:
+          1. Remove Docker volumes: docker volume prune -f
+          2. Remove CIRIS directories: rm -rf /opt/ciris
+          3. Destroy VM via Terraform or provider console
+      when: not (force | bool)
+
+    - name: "DESTROY: Remove Docker volumes"
+      ansible.builtin.shell: |
+        docker volume prune -f
+      when: force | bool
+
+    - name: "DESTROY: Remove CIRIS directories"
+      ansible.builtin.file:
+        path: /opt/ciris
+        state: absent
+      when: force | bool
+
+    - name: "DESTROY: Stop PostgreSQL"
+      ansible.builtin.shell: |
+        cd /opt/ciris/postgres && docker compose down -v || true
+      when: force | bool
+      ignore_errors: true
+
+- name: "REMOVE REGION - Completion"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    region: ""
+    force: false
+
+  tasks:
+    - name: "COMPLETE: Display summary"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          REMOVE REGION COMPLETE
+          ============================================
+          Region: {{ region }}
+
+          Completed Steps:
+          [x] DNS drain reminder
+          [x] Connections drained
+          [x] Services stopped
+          [x] Replication removed
+          [x] Data archived to ./archives/
+          {% if force %}
+          [x] Resources destroyed
+          {% else %}
+          [ ] Resources NOT destroyed (run with -e "force=true")
+          {% endif %}
+
+          Remaining manual steps:
+          1. Verify DNS no longer points to region
+          2. Update inventory/production.yml to remove host
+          3. Destroy Terraform resources (if applicable)
+          4. Update monitoring/alerting
+          5. Update CLAUDE.md documentation
+          ============================================

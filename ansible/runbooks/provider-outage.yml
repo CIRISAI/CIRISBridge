@@ -1,0 +1,339 @@
+---
+# Provider Outage Runbook
+# Handle cloud provider outages with automatic failover
+# Based on: https://upcloud.com/blog/cloud-outage-survival-guide-multi-region-dr-multi-cloud-and-cost-control/
+#
+# Usage:
+#   # Detect and assess outage
+#   ansible-playbook -i inventory/production.yml runbooks/provider-outage.yml --tags detect
+#
+#   # Failover to healthy region
+#   ansible-playbook -i inventory/production.yml runbooks/provider-outage.yml --tags failover -e "failed_region=us"
+#
+#   # Failback after recovery
+#   ansible-playbook -i inventory/production.yml runbooks/provider-outage.yml --tags failback -e "recovered_region=us"
+#
+# Current Regions:
+#   - us (Vultr Chicago): 108.61.242.236
+#   - eu (Hetzner Germany): 46.224.81.217
+
+- name: "PROVIDER OUTAGE - Detect"
+  hosts: all
+  gather_facts: false
+  tags: [detect, always]
+
+  tasks:
+    - name: "DETECT: Check host reachability"
+      ansible.builtin.wait_for_connection:
+        timeout: 10
+      register: connectivity
+      ignore_errors: true
+
+    - name: "DETECT: Set host status"
+      ansible.builtin.set_fact:
+        host_status: "{{ 'UP' if connectivity is not failed else 'DOWN' }}"
+
+- name: "PROVIDER OUTAGE - Assess"
+  hosts: localhost
+  gather_facts: false
+  tags: [detect, always]
+
+  tasks:
+    - name: "ASSESS: Collect host statuses"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          PROVIDER OUTAGE ASSESSMENT
+          ============================================
+          {% for host in groups['all'] %}
+          {{ host }}: {{ hostvars[host].host_status | default('UNKNOWN') }}
+          {% endfor %}
+          ============================================
+
+    - name: "ASSESS: Identify failed regions"
+      ansible.builtin.set_fact:
+        failed_regions: "{{ groups['all'] | select('match', '.*') | list | select('match', '.*') | list }}"
+      # In real scenario, filter by host_status == 'DOWN'
+
+- name: "PROVIDER OUTAGE - Health Check Details"
+  hosts: all
+  gather_facts: false
+  tags: [detect]
+
+  tasks:
+    - name: "HEALTH: Check Billing API"
+      ansible.builtin.uri:
+        url: "http://localhost:8080/health"
+        timeout: 5
+      register: billing_health
+      ignore_errors: true
+      when: hostvars[inventory_hostname].host_status | default('DOWN') == 'UP'
+
+    - name: "HEALTH: Check Proxy API"
+      ansible.builtin.uri:
+        url: "http://localhost:4000/health/liveliness"
+        timeout: 5
+      register: proxy_health
+      ignore_errors: true
+      when: hostvars[inventory_hostname].host_status | default('DOWN') == 'UP'
+
+    - name: "HEALTH: Check Database"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres pg_isready -U postgres
+      register: db_health
+      ignore_errors: true
+      changed_when: false
+      when: hostvars[inventory_hostname].host_status | default('DOWN') == 'UP'
+
+    - name: "HEALTH: Display status"
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          Connectivity: {{ hostvars[inventory_hostname].host_status | default('DOWN') }}
+          Billing API: {{ 'OK' if billing_health.status | default(0) == 200 else 'FAILED' }}
+          Proxy API: {{ 'OK' if proxy_health.status | default(0) == 200 else 'FAILED' }}
+          Database: {{ 'OK' if db_health.rc | default(1) == 0 else 'FAILED' }}
+      when: hostvars[inventory_hostname].host_status | default('DOWN') == 'UP'
+
+- name: "PROVIDER OUTAGE - Failover"
+  hosts: localhost
+  gather_facts: false
+  tags: [failover, never]
+  vars:
+    failed_region: ""  # Required: us or eu
+
+  tasks:
+    - name: Validate failed_region
+      ansible.builtin.fail:
+        msg: "Specify failed_region: -e 'failed_region=us' or -e 'failed_region=eu'"
+      when: failed_region | length == 0
+
+    - name: "FAILOVER: Display failover plan"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          FAILOVER PLAN
+          ============================================
+          Failed Region: {{ failed_region }}
+          Target Region: {{ 'eu' if failed_region == 'us' else 'us' }}
+
+          Actions:
+          1. Update DNS to point all traffic to healthy region
+          2. Verify healthy region can handle load
+          3. Monitor for increased error rates
+          4. Notify stakeholders
+
+          DNS Changes Required (Cloudflare):
+          {% if failed_region == 'us' %}
+          - billing1.ciris-services-1.ai -> 46.224.81.217 (EU)
+          - proxy1.ciris-services-1.ai -> 46.224.81.217 (EU)
+          {% else %}
+          - billing1.ciris-services-2.ai -> 108.61.242.236 (US)
+          - proxy1.ciris-services-2.ai -> 108.61.242.236 (US)
+          {% endif %}
+          ============================================
+
+    - name: "FAILOVER: Confirm failover"
+      ansible.builtin.pause:
+        prompt: |
+          CONFIRM FAILOVER
+          This will redirect all traffic to the healthy region.
+          Press ENTER to continue or Ctrl+C to abort.
+
+    - name: "FAILOVER: DNS update reminder"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          MANUAL DNS UPDATE REQUIRED
+          ============================================
+          1. Log into Cloudflare dashboard
+          2. Navigate to DNS settings
+          3. Update A records as shown above
+          4. Set TTL to minimum (1 minute)
+          5. Verify propagation with: dig billing1.ciris-services-1.ai
+
+          After DNS update, monitor:
+          - https://lens.ciris-services-1.ai (Grafana)
+          - Error rates in service logs
+          - Response times
+          ============================================
+
+- name: "PROVIDER OUTAGE - Verify Healthy Region"
+  hosts: "{{ 'hetzner' if (failed_region | default('')) == 'us' else 'vultr' }}"
+  gather_facts: false
+  tags: [failover, never]
+  vars:
+    failed_region: ""
+
+  tasks:
+    - name: "VERIFY: Check healthy region capacity"
+      ansible.builtin.shell: |
+        # Check CPU usage
+        top -bn1 | grep "Cpu(s)" | awk '{print $2}'
+      register: cpu_usage
+      changed_when: false
+      when: failed_region | length > 0
+
+    - name: "VERIFY: Check memory usage"
+      ansible.builtin.shell: |
+        free -m | awk 'NR==2{printf "%.1f%%", $3*100/$2 }'
+      register: mem_usage
+      changed_when: false
+      when: failed_region | length > 0
+
+    - name: "VERIFY: Check disk usage"
+      ansible.builtin.shell: |
+        df -h / | awk 'NR==2{print $5}'
+      register: disk_usage
+      changed_when: false
+      when: failed_region | length > 0
+
+    - name: "VERIFY: Display healthy region status"
+      ansible.builtin.debug:
+        msg: |
+          Healthy Region Resource Check:
+          - CPU: {{ cpu_usage.stdout | default('N/A') }}
+          - Memory: {{ mem_usage.stdout | default('N/A') }}
+          - Disk: {{ disk_usage.stdout | default('N/A') }}
+
+          If resources are constrained, consider:
+          - Scaling up the instance
+          - Enabling rate limiting
+          - Notifying users of degraded service
+      when: failed_region | length > 0
+
+- name: "PROVIDER OUTAGE - Failback"
+  hosts: localhost
+  gather_facts: false
+  tags: [failback, never]
+  vars:
+    recovered_region: ""  # Required: us or eu
+
+  tasks:
+    - name: Validate recovered_region
+      ansible.builtin.fail:
+        msg: "Specify recovered_region: -e 'recovered_region=us'"
+      when: recovered_region | length == 0
+
+    - name: "FAILBACK: Display failback plan"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          FAILBACK PLAN
+          ============================================
+          Recovered Region: {{ recovered_region }}
+
+          Pre-failback checklist:
+          [ ] Provider confirms outage resolved
+          [ ] Services verified healthy on recovered region
+          [ ] Database replication caught up
+          [ ] At least 15 minutes of stability observed
+
+          Actions:
+          1. Verify recovered region health
+          2. Check replication lag
+          3. Gradually restore DNS
+          4. Monitor for issues
+          5. Full DNS restoration
+          ============================================
+
+- name: "PROVIDER OUTAGE - Verify Recovered Region"
+  hosts: "{{ recovered_region | default('none') }}"
+  gather_facts: false
+  tags: [failback, never]
+  vars:
+    recovered_region: ""
+
+  tasks:
+    - name: "VERIFY: Check recovered region services"
+      ansible.builtin.uri:
+        url: "http://localhost:8080/health"
+        timeout: 10
+      register: billing_health
+      ignore_errors: true
+      when: recovered_region | length > 0
+
+    - name: "VERIFY: Check database replication"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            CASE
+              WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 'CAUGHT_UP'
+              ELSE 'LAGGING'
+            END as replication_status;
+        " 2>/dev/null || echo "Replication check failed"
+      register: replication_status
+      changed_when: false
+      when: recovered_region | length > 0
+
+    - name: "VERIFY: Display recovery status"
+      ansible.builtin.debug:
+        msg: |
+          Recovered Region Status:
+          - Billing API: {{ 'OK' if billing_health.status | default(0) == 200 else 'FAILED' }}
+          - Replication: {{ replication_status.stdout | default('UNKNOWN') }}
+
+          If all checks pass, proceed with DNS failback:
+          1. Update Cloudflare DNS to restore original routing
+          2. Monitor error rates for 15 minutes
+          3. Confirm full recovery
+      when: recovered_region | length > 0
+
+- name: "PROVIDER OUTAGE - Post-Incident"
+  hosts: localhost
+  gather_facts: false
+  tags: [failback, never]
+
+  tasks:
+    - name: "POST-INCIDENT: Create incident report template"
+      ansible.builtin.copy:
+        content: |
+          # Provider Outage Incident Report
+
+          **Date:** {{ lookup('pipe', 'date -Iseconds') }}
+          **Duration:** [FILL IN]
+          **Affected Region:** {{ failed_region | default('[FILL IN]') }}
+          **Impact:** [FILL IN]
+
+          ## Timeline
+          - [TIME] - Outage detected
+          - [TIME] - Failover initiated
+          - [TIME] - DNS updated
+          - [TIME] - Traffic redirected
+          - [TIME] - Provider recovery confirmed
+          - [TIME] - Failback completed
+
+          ## Root Cause
+          [Provider statement/analysis]
+
+          ## Impact Assessment
+          - Users affected: [NUMBER]
+          - Requests failed: [NUMBER]
+          - Revenue impact: [AMOUNT]
+
+          ## Lessons Learned
+          1. [LESSON]
+          2. [LESSON]
+
+          ## Action Items
+          - [ ] Update runbooks if needed
+          - [ ] Review monitoring thresholds
+          - [ ] Schedule post-incident review
+          - [ ] Update status page
+        dest: "./incident-reports/provider-outage-{{ lookup('pipe', 'date +%Y%m%d') }}.md"
+        mode: '0644'
+      ignore_errors: true  # Directory might not exist
+
+    - name: "POST-INCIDENT: Summary"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          POST-INCIDENT CHECKLIST
+          ============================================
+          [ ] Incident report completed
+          [ ] Post-incident review scheduled
+          [ ] Provider SLA review if applicable
+          [ ] Runbooks updated with lessons learned
+          [ ] Team debriefed
+          [ ] Status page updated
+          ============================================

@@ -1,0 +1,366 @@
+---
+# General Incident Response Runbook
+# Structured incident management for any service disruption
+# Reference: https://sre.google/sre-book/managing-incidents/
+#
+# Usage:
+#   # Start incident with severity level
+#   ansible-playbook -i inventory/production.yml runbooks/incident-response.yml -e "severity=P1"
+#
+#   # Collect diagnostics only
+#   ansible-playbook -i inventory/production.yml runbooks/incident-response.yml --tags diagnose
+#
+#   # Close incident with resolution
+#   ansible-playbook -i inventory/production.yml runbooks/incident-response.yml --tags close -e "resolution='Fixed by restarting service'"
+#
+# Severity Levels:
+#   P1 - Critical: Complete service outage, revenue impact
+#   P2 - High: Major feature unavailable, degraded service
+#   P3 - Medium: Minor feature issue, workaround available
+#   P4 - Low: Cosmetic issue, no user impact
+
+- name: "INCIDENT RESPONSE - Initialize"
+  hosts: localhost
+  gather_facts: false
+  tags: [always]
+  vars:
+    severity: "P2"  # Default severity
+    incident_id: "INC-{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+    incident_dir: "./incidents/{{ incident_id }}"
+
+  tasks:
+    - name: Create incident directory
+      ansible.builtin.file:
+        path: "{{ incident_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: "INIT: Display incident header"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          INCIDENT RESPONSE INITIATED
+          ============================================
+          Incident ID: {{ incident_id }}
+          Severity: {{ severity }}
+          Started: {{ lookup('pipe', 'date -Iseconds') }}
+          Responder: {{ lookup('env', 'USER') }}
+
+          SEVERITY GUIDELINES:
+          P1 - Critical: Immediate escalation, all hands
+          P2 - High: Primary on-call + backup
+          P3 - Medium: Primary on-call only
+          P4 - Low: Can wait for business hours
+          ============================================
+
+    - name: "INIT: Create incident log"
+      ansible.builtin.copy:
+        content: |
+          # Incident {{ incident_id }}
+
+          **Severity:** {{ severity }}
+          **Started:** {{ lookup('pipe', 'date -Iseconds') }}
+          **Responder:** {{ lookup('env', 'USER') }}
+          **Status:** INVESTIGATING
+
+          ## Timeline
+          - {{ lookup('pipe', 'date -Iseconds') }} - Incident declared
+
+          ## Impact
+          [Describe user impact here]
+
+          ## Investigation Notes
+          [Add findings as you investigate]
+
+        dest: "{{ incident_dir }}/incident.md"
+        mode: '0644'
+
+- name: "INCIDENT RESPONSE - Diagnose"
+  hosts: all
+  gather_facts: true
+  tags: [diagnose, always]
+  vars:
+    incident_id: "INC-{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+    incident_dir: "./incidents/{{ incident_id }}"
+
+  tasks:
+    - name: "DIAGNOSE: Check host connectivity"
+      ansible.builtin.wait_for_connection:
+        timeout: 10
+      register: connectivity
+      ignore_errors: true
+
+    - name: "DIAGNOSE: Gather system facts"
+      ansible.builtin.setup:
+        gather_subset:
+          - hardware
+          - network
+      when: connectivity is not failed
+      ignore_errors: true
+
+    - name: "DIAGNOSE: Check service health - Billing"
+      ansible.builtin.uri:
+        url: "http://localhost:8080/health"
+        timeout: 5
+      register: billing_health
+      ignore_errors: true
+      when: connectivity is not failed
+
+    - name: "DIAGNOSE: Check service health - Proxy"
+      ansible.builtin.uri:
+        url: "http://localhost:4000/health/liveliness"
+        timeout: 5
+      register: proxy_health
+      ignore_errors: true
+      when: connectivity is not failed
+
+    - name: "DIAGNOSE: Check service health - Database"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres pg_isready -U postgres
+      register: db_health
+      ignore_errors: true
+      changed_when: false
+      when: connectivity is not failed
+
+    - name: "DIAGNOSE: Check Docker containers"
+      ansible.builtin.shell: |
+        docker ps --format "table {{ '{{' }}.Names{{ '}}' }}\t{{ '{{' }}.Status{{ '}}' }}\t{{ '{{' }}.Ports{{ '}}' }}"
+      register: docker_status
+      ignore_errors: true
+      changed_when: false
+      when: connectivity is not failed
+
+    - name: "DIAGNOSE: Check system resources"
+      ansible.builtin.shell: |
+        echo "=== CPU ==="
+        top -bn1 | head -5
+        echo ""
+        echo "=== Memory ==="
+        free -h
+        echo ""
+        echo "=== Disk ==="
+        df -h /
+      register: system_resources
+      ignore_errors: true
+      changed_when: false
+      when: connectivity is not failed
+
+    - name: "DIAGNOSE: Get recent error logs"
+      ansible.builtin.shell: |
+        echo "=== Billing Errors (last 50) ==="
+        docker logs ciris-billing --tail 50 2>&1 | grep -i error || echo "No errors"
+        echo ""
+        echo "=== Proxy Errors (last 50) ==="
+        docker logs ciris-proxy --tail 50 2>&1 | grep -i error || echo "No errors"
+      register: error_logs
+      ignore_errors: true
+      changed_when: false
+      when: connectivity is not failed
+
+    - name: "DIAGNOSE: Display health summary"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          DIAGNOSTIC SUMMARY - {{ inventory_hostname }}
+          ============================================
+          Connectivity: {{ 'UP' if connectivity is not failed else 'DOWN' }}
+          Billing API: {{ 'OK' if billing_health.status | default(0) == 200 else 'FAILED' }}
+          Proxy API: {{ 'OK' if proxy_health.status | default(0) == 200 else 'FAILED' }}
+          Database: {{ 'OK' if db_health.rc | default(1) == 0 else 'FAILED' }}
+
+          Docker Containers:
+          {{ docker_status.stdout | default('Unable to query') }}
+
+          System Resources:
+          {{ system_resources.stdout | default('Unable to query') }}
+          ============================================
+
+- name: "INCIDENT RESPONSE - Common Fixes"
+  hosts: all
+  gather_facts: false
+  tags: [fix, never]
+  vars:
+    fix_action: ""  # restart_billing, restart_proxy, restart_all, clear_cache
+
+  tasks:
+    - name: Validate fix_action
+      ansible.builtin.fail:
+        msg: |
+          Specify fix_action:
+            -e "fix_action=restart_billing"
+            -e "fix_action=restart_proxy"
+            -e "fix_action=restart_all"
+            -e "fix_action=clear_cache"
+      when: fix_action | length == 0
+
+    - name: "FIX: Restart Billing service"
+      ansible.builtin.shell: |
+        cd /opt/ciris/billing && docker compose down && docker compose up -d
+      when: fix_action in ['restart_billing', 'restart_all']
+
+    - name: "FIX: Restart Proxy service"
+      ansible.builtin.shell: |
+        cd /opt/ciris/proxy && docker compose down && docker compose up -d
+      when: fix_action in ['restart_proxy', 'restart_all']
+
+    - name: "FIX: Clear Redis cache"
+      ansible.builtin.shell: |
+        docker exec ciris-redis redis-cli FLUSHALL
+      when: fix_action == 'clear_cache'
+      ignore_errors: true
+
+    - name: "FIX: Wait for services to stabilize"
+      ansible.builtin.pause:
+        seconds: 10
+      when: fix_action | length > 0
+
+    - name: "FIX: Verify service health after fix"
+      ansible.builtin.uri:
+        url: "{{ item }}"
+        timeout: 10
+      loop:
+        - "http://localhost:8080/health"
+        - "http://localhost:4000/health/liveliness"
+      register: post_fix_health
+      ignore_errors: true
+      when: fix_action | length > 0
+
+    - name: "FIX: Display post-fix status"
+      ansible.builtin.debug:
+        msg: "Services restarted. Check diagnostics for current status."
+      when: fix_action | length > 0
+
+- name: "INCIDENT RESPONSE - Escalation"
+  hosts: localhost
+  gather_facts: false
+  tags: [escalate, never]
+  vars:
+    severity: "P2"
+    escalation_reason: ""
+
+  tasks:
+    - name: "ESCALATE: Display escalation guidance"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          ESCALATION REQUIRED
+          ============================================
+          Current Severity: {{ severity }}
+          Reason: {{ escalation_reason | default('Not specified') }}
+
+          ESCALATION CONTACTS:
+          - Primary On-Call: Check PagerDuty
+          - Secondary On-Call: Check PagerDuty
+          - Engineering Lead: [Contact info]
+
+          ESCALATION CRITERIA:
+          P1 - Escalate immediately via page
+          P2 - Escalate within 15 minutes if no progress
+          P3 - Escalate within 1 hour if no progress
+          P4 - Escalate next business day
+
+          COMMUNICATION TEMPLATE:
+          Subject: [{{ severity }}] CIRIS Service Incident
+          Body:
+            Incident ID: [incident_id]
+            Services Affected: [list services]
+            User Impact: [describe impact]
+            Current Status: [investigating/mitigating/resolved]
+            ETA: [if known]
+          ============================================
+
+- name: "INCIDENT RESPONSE - Close"
+  hosts: localhost
+  gather_facts: false
+  tags: [close, never]
+  vars:
+    resolution: ""
+    root_cause: ""
+    incident_id: ""
+
+  tasks:
+    - name: Validate closure information
+      ansible.builtin.fail:
+        msg: "Specify resolution: -e \"resolution='Description of fix'\""
+      when: resolution | length == 0
+
+    - name: "CLOSE: Create incident report"
+      ansible.builtin.copy:
+        content: |
+          # Incident Report
+
+          **Incident ID:** {{ incident_id | default('Unknown') }}
+          **Closed:** {{ lookup('pipe', 'date -Iseconds') }}
+          **Resolution:** {{ resolution }}
+          **Root Cause:** {{ root_cause | default('To be determined in post-incident review') }}
+
+          ## Post-Incident Checklist
+          - [ ] Root cause analysis completed
+          - [ ] Action items identified
+          - [ ] Monitoring/alerting improvements identified
+          - [ ] Runbook updates needed
+          - [ ] Team debriefed
+          - [ ] Status page updated
+
+          ## Action Items
+          1. [Add action items here]
+
+          ## Lessons Learned
+          1. [Add lessons learned here]
+
+        dest: "./incidents/incident-report-{{ lookup('pipe', 'date +%Y%m%d') }}.md"
+        mode: '0644'
+
+    - name: "CLOSE: Display closure summary"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          INCIDENT CLOSED
+          ============================================
+          Resolution: {{ resolution }}
+
+          NEXT STEPS:
+          1. Complete incident report
+          2. Schedule post-incident review (within 48 hours)
+          3. Update status page
+          4. Archive incident artifacts
+
+          Report saved to: ./incidents/incident-report-{{ lookup('pipe', 'date +%Y%m%d') }}.md
+          ============================================
+
+- name: "INCIDENT RESPONSE - Runbook Index"
+  hosts: localhost
+  gather_facts: false
+  tags: [help]
+
+  tasks:
+    - name: "HELP: Display available runbooks"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          CIRIS INCIDENT RUNBOOKS
+          ============================================
+
+          GENERAL INCIDENT:
+          ansible-playbook runbooks/incident-response.yml -e "severity=P1"
+          ansible-playbook runbooks/incident-response.yml --tags diagnose
+          ansible-playbook runbooks/incident-response.yml --tags fix -e "fix_action=restart_all"
+          ansible-playbook runbooks/incident-response.yml --tags close -e "resolution='Fixed'"
+
+          PROVIDER OUTAGE:
+          ansible-playbook runbooks/provider-outage.yml --tags detect
+          ansible-playbook runbooks/provider-outage.yml --tags failover -e "failed_region=us"
+          ansible-playbook runbooks/provider-outage.yml --tags failback -e "recovered_region=us"
+
+          INTRUSION RESPONSE:
+          ansible-playbook runbooks/intrusion-response.yml --limit <node>
+          ansible-playbook runbooks/intrusion-response.yml -e "block_ip=1.2.3.4"
+
+          ADD REGION:
+          ansible-playbook runbooks/add-region.yml -e "new_region=ap"
+
+          REMOVE REGION:
+          ansible-playbook runbooks/remove-region.yml -e "region=eu"
+          ansible-playbook runbooks/remove-region.yml -e "region=eu" -e "force=true"
+
+          ============================================

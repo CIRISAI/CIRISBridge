@@ -1,0 +1,170 @@
+---
+# Intrusion Response Runbook
+# Based on SRE best practices from Red Hat Security Automation
+# Reference: https://www.redhat.com/en/blog/getting-started-with-ansible-security-automation-incident-response
+#
+# Usage:
+#   ansible-playbook -i inventory/production.yml runbooks/intrusion-response.yml --limit <compromised_node>
+#   ansible-playbook -i inventory/production.yml runbooks/intrusion-response.yml --limit eu -e "block_ip=1.2.3.4"
+#
+# Actions:
+#   Phase 1: Isolate - Block attacker IP, disable external access
+#   Phase 2: Preserve - Collect forensic data before changes
+#   Phase 3: Contain - Stop compromised services, rotate credentials
+#   Phase 4: Notify - Alert team and document incident
+
+- name: "INTRUSION RESPONSE - Phase 1: Isolate"
+  hosts: all
+  gather_facts: true
+  vars:
+    incident_id: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+    forensics_dir: "/tmp/forensics-{{ incident_id }}"
+    block_ip: ""  # Set via -e "block_ip=x.x.x.x"
+
+  tasks:
+    - name: Create forensics directory
+      ansible.builtin.file:
+        path: "{{ forensics_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: "ISOLATE: Block attacker IP via iptables (if specified)"
+      ansible.builtin.iptables:
+        chain: INPUT
+        source: "{{ block_ip }}"
+        jump: DROP
+        comment: "Blocked by intrusion response {{ incident_id }}"
+      when: block_ip | length > 0
+      become: true
+
+    - name: "ISOLATE: Log blocked IP"
+      ansible.builtin.lineinfile:
+        path: "{{ forensics_dir }}/blocked_ips.txt"
+        line: "{{ ansible_date_time.iso8601 }} - Blocked {{ block_ip }}"
+        create: true
+      when: block_ip | length > 0
+
+- name: "INTRUSION RESPONSE - Phase 2: Preserve Evidence"
+  hosts: all
+  gather_facts: false
+  vars:
+    incident_id: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+    forensics_dir: "/tmp/forensics-{{ incident_id }}"
+
+  tasks:
+    - name: "PRESERVE: Capture current connections"
+      ansible.builtin.shell: |
+        ss -tunapl > {{ forensics_dir }}/connections.txt 2>&1
+      args:
+        creates: "{{ forensics_dir }}/connections.txt"
+
+    - name: "PRESERVE: Capture running processes"
+      ansible.builtin.shell: |
+        ps auxf > {{ forensics_dir }}/processes.txt 2>&1
+      args:
+        creates: "{{ forensics_dir }}/processes.txt"
+
+    - name: "PRESERVE: Capture docker containers"
+      ansible.builtin.shell: |
+        docker ps -a > {{ forensics_dir }}/docker_containers.txt 2>&1
+        docker logs ciris-billing --tail 1000 > {{ forensics_dir }}/billing_logs.txt 2>&1 || true
+        docker logs ciris-proxy --tail 1000 > {{ forensics_dir }}/proxy_logs.txt 2>&1 || true
+      args:
+        creates: "{{ forensics_dir }}/docker_containers.txt"
+
+    - name: "PRESERVE: Capture authentication logs"
+      ansible.builtin.shell: |
+        journalctl -u sshd --since "24 hours ago" > {{ forensics_dir }}/ssh_auth.txt 2>&1 || true
+        cat /var/log/auth.log > {{ forensics_dir }}/auth_log.txt 2>&1 || true
+        last -100 > {{ forensics_dir }}/last_logins.txt 2>&1
+      args:
+        creates: "{{ forensics_dir }}/ssh_auth.txt"
+
+    - name: "PRESERVE: Capture iptables rules"
+      ansible.builtin.shell: |
+        iptables -L -n -v > {{ forensics_dir }}/iptables.txt 2>&1
+      become: true
+      args:
+        creates: "{{ forensics_dir }}/iptables.txt"
+
+    - name: "PRESERVE: Create forensics archive"
+      ansible.builtin.archive:
+        path: "{{ forensics_dir }}"
+        dest: "/tmp/forensics-{{ incident_id }}.tar.gz"
+        format: gz
+
+    - name: "PRESERVE: Fetch forensics archive to control node"
+      ansible.builtin.fetch:
+        src: "/tmp/forensics-{{ incident_id }}.tar.gz"
+        dest: "./forensics/"
+        flat: false
+
+- name: "INTRUSION RESPONSE - Phase 3: Contain"
+  hosts: all
+  gather_facts: false
+  vars:
+    rotate_credentials: false  # Set -e "rotate_credentials=true" to rotate
+
+  tasks:
+    - name: "CONTAIN: Display containment options"
+      ansible.builtin.debug:
+        msg: |
+          Containment options available:
+          - Set rotate_credentials=true to rotate API keys and secrets
+          - Manually stop services if needed: docker compose down
+          - Consider removing node from DNS/load balancer
+
+    - name: "CONTAIN: Rotate billing API key (if requested)"
+      when: rotate_credentials | bool
+      block:
+        - name: Generate new API key
+          ansible.builtin.debug:
+            msg: "API key rotation requires manual intervention - update via admin panel or database"
+
+- name: "INTRUSION RESPONSE - Phase 4: Notify"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    incident_id: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+
+  tasks:
+    - name: "NOTIFY: Create incident summary"
+      ansible.builtin.copy:
+        content: |
+          # Intrusion Response Incident Report
+
+          **Incident ID:** {{ incident_id }}
+          **Timestamp:** {{ lookup('pipe', 'date -Iseconds') }}
+          **Responder:** {{ lookup('env', 'USER') }}
+
+          ## Actions Taken
+          - [ ] Attacker IP blocked (if applicable)
+          - [ ] Forensic evidence collected
+          - [ ] Credentials rotated (if applicable)
+
+          ## Next Steps
+          1. Review forensics archive in ./forensics/
+          2. Analyze logs for attack vector
+          3. Update firewall rules permanently
+          4. Conduct post-incident review
+
+          ## Contacts
+          - Security Team: security@ciris.ai
+          - On-call: Check PagerDuty
+        dest: "./forensics/incident-{{ incident_id }}-summary.md"
+
+    - name: "NOTIFY: Display completion message"
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          INTRUSION RESPONSE COMPLETE
+          ============================================
+          Incident ID: {{ incident_id }}
+          Forensics saved to: ./forensics/
+
+          NEXT STEPS:
+          1. Review forensics data
+          2. Determine attack vector
+          3. Patch vulnerabilities
+          4. Conduct post-incident review
+          ============================================
