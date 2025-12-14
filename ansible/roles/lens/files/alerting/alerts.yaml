@@ -28,6 +28,7 @@ groups:
                 WHERE level IN ('ERROR', 'CRITICAL')
                   AND timestamp > NOW() - INTERVAL '5 minutes'
                   AND message NOT LIKE '%play_integrity%'
+                  AND message NOT LIKE '%RateLimitError%'
               format: table
           - refId: B
             relativeTimeRange:
@@ -84,7 +85,7 @@ groups:
         for: 0s
         annotations:
           summary: "Service errors detected in CIRIS infrastructure"
-          description: "One or more CIRIS services have logged ERROR or CRITICAL level messages in the last 5 minutes (excludes Play Integrity errors)."
+          description: "One or more CIRIS services have logged ERROR or CRITICAL level messages in the last 5 minutes (excludes Play Integrity and rate limit errors)."
           runbook_url: "https://lens.ciris-services-1.ai/d/error-correlation/error-correlation"
         labels:
           severity: warning
@@ -109,6 +110,7 @@ groups:
                 WHERE level IN ('ERROR', 'CRITICAL')
                   AND timestamp > NOW() - INTERVAL '5 minutes'
                   AND message NOT LIKE '%play_integrity%'
+                  AND message NOT LIKE '%RateLimitError%'
               format: table
           - refId: B
             relativeTimeRange:
@@ -143,7 +145,7 @@ groups:
         for: 0s
         annotations:
           summary: "High error rate detected"
-          description: "More than 5 errors detected in the last 5 minutes across CIRIS services (excludes Play Integrity errors)."
+          description: "More than 5 errors detected in the last 5 minutes across CIRIS services (excludes Play Integrity and rate limit errors)."
           runbook_url: "https://lens.ciris-services-1.ai/d/error-correlation/error-correlation"
         labels:
           severity: critical
@@ -169,6 +171,7 @@ groups:
                   AND level IN ('ERROR', 'CRITICAL')
                   AND timestamp > NOW() - INTERVAL '5 minutes'
                   AND message NOT LIKE '%play_integrity%'
+                  AND message NOT LIKE '%RateLimitError%'
               format: table
           - refId: B
             relativeTimeRange:
