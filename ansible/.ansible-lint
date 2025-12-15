@@ -1,0 +1,17 @@
+# Ansible Lint Configuration
+# https://ansible.readthedocs.io/projects/lint/configuring/
+
+# Skip rules that conflict with emergency runbook patterns
+skip_list:
+  # Emergency runbooks intentionally use ignore_errors to ensure
+  # pause/resume operations continue even if individual steps fail
+  - ignore-errors  # runbooks need to continue on failure
+  - no-changed-when  # shell commands in runbooks are idempotent by nature
+
+# Warn but don't fail on these
+warn_list:
+  - experimental
+
+# Exclude generated/vendor files
+exclude_paths:
+  - .github/
