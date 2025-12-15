@@ -87,6 +87,8 @@
         src: contactpoints.yaml.j2
         dest: /opt/ciris/lens/config/grafana/provisioning/alerting/contactpoints.yaml
         mode: "0600"
+        owner: "472"  # Grafana user
+        group: "472"
       notify: Restart CIRISLens
 
     - name: Copy TimescaleDB init script

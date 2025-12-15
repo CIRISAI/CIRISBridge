@@ -2,6 +2,30 @@
 # Log Audit Runbook
 # Quick manual inspection of logs across all services
 #
+# ISSUE RESOLUTION GUIDANCE:
+# -------------------------
+# When issues are found, determine ownership:
+#
+# CIRISBridge issues (fix here):
+#   - Ansible role/template bugs
+#   - Docker-compose configuration
+#   - Infrastructure provisioning
+#   - Deployment scripts
+#
+# Sibling repo issues (create bug report):
+#   - CIRISBilling: Application bugs, API errors
+#   - CIRISProxy: Routing issues, provider errors
+#   - CIRISLens: Dashboard/collection bugs (not config)
+#   - CIRISDNS: Zone resolution issues
+#
+# Bug report template for sibling repos:
+#   Title: [BUG] <brief description>
+#   Environment: Production (vultr/hetzner)
+#   Observed: <what's happening>
+#   Expected: <what should happen>
+#   Logs: <relevant log snippets>
+#   Impact: <service degradation level>
+#
 # Usage:
 #   # Full audit (all services, both regions)
 #   ansible-playbook -i inventory/production.yml runbooks/log-audit.yml

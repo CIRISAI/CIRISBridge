@@ -32,7 +32,8 @@ services:
     ports:
       - "127.0.0.1:6432:6432"
     environment:
-      DATABASE_URL: "postgres://postgres:{{ postgres_password }}@postgres:5432/ciris_billing"
+      # URL-encode password to handle special characters (/, +, etc.)
+      DATABASE_URL: "postgres://postgres:{{ postgres_password | urlencode }}@postgres:5432/ciris_billing"
       POOL_MODE: transaction
       MAX_CLIENT_CONN: 1000
       DEFAULT_POOL_SIZE: 25
