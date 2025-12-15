@@ -12,6 +12,7 @@ skip_list:
   - risky-file-permissions  # permissions are set appropriately for secrets
   - fqcn[action-core]  # builtin modules don't need FQCN
   - fqcn[action]  # community modules work without FQCN
+  - fqcn[canonical]  # non-canonical names are fine
 
 # Warn but don't fail on these
 warn_list:
