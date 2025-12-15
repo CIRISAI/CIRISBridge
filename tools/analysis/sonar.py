@@ -149,13 +149,13 @@ class SonarClient:
 
     def mark_hotspot_safe(self, hotspot_key: str, comment: Optional[str] = None) -> Dict[str, Any]:
         """Mark a security hotspot as safe."""
-        data = {"hotspot": hotspot_key, "status": "SAFE"}
+        data = {"hotspot": hotspot_key, "status": "REVIEWED", "resolution": "SAFE"}
         if comment:
             data["comment"] = comment
 
         response = self.session.post(f"{SONAR_API_BASE}/hotspots/change_status", data=data)
         response.raise_for_status()
-        return response.json()
+        return {}
 
     def get_coverage_metrics(self, new_code: bool = False, pull_request: Optional[str] = None) -> Dict[str, Any]:
         """Get coverage metrics for the project or a specific PR."""
