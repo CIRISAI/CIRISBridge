@@ -1,0 +1,212 @@
+---
+# Safety Incident Response Runbook
+# CIRIS Safety Policy: Five-Step Response Workflow
+#
+# Response Workflow:
+#   1. ASSESS remediability
+#   2. IMPLEMENT fixes
+#   3. PAUSE services only when necessary
+#   4. COMMUNICATE transparently via status page
+#   5. RESOLVE underlying issues
+#
+# Usage:
+#   # Start incident response workflow
+#   ansible-playbook -i inventory/production.yml runbooks/safety-incident-response.yml --tags workflow -e "incident_id=INC-001"
+#
+#   # Update status page
+#   ansible-playbook -i inventory/production.yml runbooks/safety-incident-response.yml --tags communicate -e "incident_id=INC-001" -e "status=investigating"
+
+- name: "SAFETY INCIDENT - Response Workflow"
+  hosts: localhost
+  gather_facts: true
+  tags: [workflow]
+  vars:
+    incident_id: "UNSET"
+
+  tasks:
+    - name: Validate incident ID
+      ansible.builtin.fail:
+        msg: "Must provide incident_id: -e \"incident_id=INC-XXX\""
+      when: incident_id == "UNSET"
+
+    - name: "WORKFLOW: Display 5-step response process"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          CIRIS SAFETY INCIDENT RESPONSE - {{ incident_id }}
+          ============================================================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+
+          STEP 1: ASSESS REMEDIABILITY
+          ─────────────────────────────
+          [ ] Can this be fixed with a code patch?
+          [ ] Can this be fixed with configuration?
+          [ ] Can affected functionality be isolated?
+          [ ] Is harm ongoing and active?
+
+          Document findings:
+          - Root cause: _______________________
+          - Affected systems: _________________
+          - User impact: _____________________
+          - Remediable: YES / NO
+
+          STEP 2: IMPLEMENT FIXES (if remediable)
+          ─────────────────────────────
+          [ ] Code patch developed and tested
+          [ ] Configuration change prepared
+          [ ] Rollback plan documented
+          [ ] Fix deployed to staging/test
+
+          Deploy fix:
+          ansible-playbook playbooks/site.yml --tags <service>
+
+          STEP 3: PAUSE SERVICES (only if not remediable)
+          ─────────────────────────────
+          Global pause (all regions):
+          ansible-playbook runbooks/safety-global-pause.yml --tags pause -e "reason='{{ incident_id }}: ...'"
+
+          Regional pause (one region):
+          ansible-playbook runbooks/safety-regional-pause.yml --tags pause --limit <region> -e "reason='...'"
+
+          STEP 4: COMMUNICATE TRANSPARENTLY
+          ─────────────────────────────
+          [ ] Update status page: https://lens.ciris-services-1.ai
+          [ ] Post incident notice (if public-facing)
+          [ ] Notify affected users (if identifiable)
+
+          Status page reflects real-time conditions per transparency policy.
+
+          STEP 5: RESOLVE UNDERLYING ISSUES
+          ─────────────────────────────
+          [ ] Root cause fully addressed
+          [ ] Prevention measures implemented
+          [ ] Monitoring/alerting improved
+          [ ] Post-incident review scheduled
+          [ ] Services resumed (if paused)
+
+          Resume services:
+          ansible-playbook runbooks/safety-global-pause.yml --tags resume
+          OR
+          ansible-playbook runbooks/safety-regional-pause.yml --tags resume --limit <region>
+
+          ============================================================
+
+- name: "SAFETY INCIDENT - Status Communication"
+  hosts: vultr
+  gather_facts: false
+  tags: [communicate, never]
+  vars:
+    incident_id: "UNSET"
+    status: "investigating"
+    message: ""
+
+  tasks:
+    - name: Validate parameters
+      ansible.builtin.fail:
+        msg: "Must provide incident_id and status"
+      when: incident_id == "UNSET"
+      run_once: true
+
+    - name: "COMMUNICATE: Log incident status update"
+      ansible.builtin.shell: |
+        mkdir -p /var/log/ciris
+        echo "[$(date -Iseconds)] {{ incident_id }} STATUS={{ status }}: {{ message }}" >> /var/log/ciris/incidents.log
+
+    - name: "COMMUNICATE: Display status update guidance"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          INCIDENT STATUS UPDATE - {{ incident_id }}
+          ============================================================
+          Status: {{ status }}
+          Message: {{ message | default('No message provided') }}
+
+          STATUS VALUES:
+          - investigating: Initial response, gathering information
+          - identified: Root cause known, working on fix
+          - monitoring: Fix deployed, watching for issues
+          - resolved: Incident fully resolved
+
+          UPDATE STATUS PAGE:
+          1. Go to https://lens.ciris-services-1.ai
+          2. Update incident status
+          3. Add timeline entry
+
+          TRANSPARENCY COMMITMENT:
+          "Status page reflects real-time conditions"
+          "Silence regarding pauses indicates legal restrictions"
+          ============================================================
+
+- name: "SAFETY INCIDENT - Post-Incident Review"
+  hosts: localhost
+  gather_facts: true
+  tags: [review, never]
+  vars:
+    incident_id: "UNSET"
+
+  tasks:
+    - name: "REVIEW: Post-incident review template"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          POST-INCIDENT REVIEW - {{ incident_id }}
+          ============================================================
+          Review Date: {{ ansible_date_time.date }}
+
+          INCIDENT SUMMARY
+          ─────────────────────────────
+          Incident ID: {{ incident_id }}
+          Duration: _______ minutes/hours
+          Affected Users: _______
+          Severity: LOW / MEDIUM / HIGH / CRITICAL
+
+          TIMELINE
+          ─────────────────────────────
+          [ ] Detection time: _______
+          [ ] Response initiated: _______
+          [ ] Root cause identified: _______
+          [ ] Fix implemented: _______
+          [ ] Services restored: _______
+          [ ] Incident closed: _______
+
+          ROOT CAUSE ANALYSIS
+          ─────────────────────────────
+          What happened:
+
+
+          Why it happened:
+
+
+          Contributing factors:
+
+
+          RESPONSE EVALUATION
+          ─────────────────────────────
+          What went well:
+
+
+          What could be improved:
+
+
+          Was pause necessary? YES / NO
+          If YES, was it timely? _______
+          If NO, why not? _______
+
+          ACTION ITEMS
+          ─────────────────────────────
+          [ ] Action 1: _______
+              Owner: _______
+              Due: _______
+
+          [ ] Action 2: _______
+              Owner: _______
+              Due: _______
+
+          PREVENTION MEASURES
+          ─────────────────────────────
+          [ ] Monitoring improvements: _______
+          [ ] Code changes: _______
+          [ ] Process changes: _______
+          [ ] Documentation updates: _______
+
+          ============================================================

@@ -102,6 +102,18 @@ services:
       # Collection settings
       COLLECTION_INTERVAL_SECONDS: {{ lens_collection_interval | default(30) }}
       OTLP_COLLECTION_ENABLED: false
+      # Status collector (multi-region monitoring)
+      # US Region (Vultr Chicago) - internal for local, external for cross-region
+      US_BILLING_URL: https://billing1.{{ primary_domain }}
+      US_PROXY_URL: https://proxy1.{{ primary_domain }}
+      # EU Region (Hetzner Germany)
+      EU_BILLING_URL: https://billing1.{{ secondary_domain }}
+      EU_PROXY_URL: https://proxy1.{{ secondary_domain }}
+      # Infrastructure health checks
+      VULTR_HEALTH_URL: https://billing1.{{ primary_domain }}/health
+      HETZNER_HEALTH_URL: https://billing1.{{ secondary_domain }}/health
+      GHCR_HEALTH_URL: https://ghcr.io/v2/
+      GRAFANA_URL: http://grafana:3000
     volumes:
       - /var/log/ciris/lens:/app/logs
       - ./sql:/app/sql:ro

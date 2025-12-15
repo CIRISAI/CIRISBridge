@@ -1,0 +1,203 @@
+---
+# Global Service Pause Runbook
+# CIRIS Safety Policy: "Fix if we can. Pause only if we can't."
+#
+# This runbook implements GLOBAL service pause for critical safety events.
+# Use ONLY when issues cannot be remedied through patches or configuration.
+#
+# GLOBAL PAUSE TRIGGERS (per ciris.ai/safety-policy/):
+#   1. Security Vulnerability - Unpatched vulnerabilities posing active user risk
+#   2. Irremediable Harm - Ongoing, unfixable damage attributable to the system
+#   3. Core Ethical Violation - Architectural breaches of Covenant principles
+#
+# Usage:
+#   # Assess before pausing (DRY RUN)
+#   ansible-playbook -i inventory/production.yml runbooks/safety-global-pause.yml --tags assess
+#
+#   # Execute global pause
+#   ansible-playbook -i inventory/production.yml runbooks/safety-global-pause.yml --tags pause -e "reason='Security vulnerability CVE-XXXX'"
+#
+#   # Resume services after resolution
+#   ansible-playbook -i inventory/production.yml runbooks/safety-global-pause.yml --tags resume
+
+- name: "SAFETY - Assess Remediability"
+  hosts: localhost
+  gather_facts: true
+  tags: [assess]
+
+  tasks:
+    - name: "ASSESS: Display safety assessment checklist"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          CIRIS SAFETY ASSESSMENT - "Fix if we can. Pause only if we can't."
+          ============================================================
+
+          Before initiating a GLOBAL PAUSE, confirm:
+
+          [ ] 1. Can this be fixed with a code patch?
+              - If YES: Deploy fix instead of pausing
+
+          [ ] 2. Can this be mitigated with configuration change?
+              - If YES: Apply config change instead of pausing
+
+          [ ] 3. Can affected functionality be isolated?
+              - If YES: Disable specific feature instead of full pause
+
+          [ ] 4. Is the harm ONGOING and ACTIVE?
+              - If NO: Schedule maintenance window instead
+
+          [ ] 5. Have you documented the issue?
+              - Incident ID: ________________
+              - Description: ________________
+              - Affected users: ________________
+
+          PAUSE TRIGGERS (must meet ONE):
+          [ ] Security Vulnerability - Unpatched, active user risk
+          [ ] Irremediable Harm - Ongoing damage, no fix possible
+          [ ] Core Ethical Violation - Covenant breach
+
+          If ALL remediation options exhausted, proceed with:
+          ansible-playbook runbooks/safety-global-pause.yml --tags pause -e "reason='...'"
+          ============================================================
+
+- name: "SAFETY - Global Service Pause"
+  hosts: all
+  gather_facts: false
+  tags: [pause, never]
+  vars:
+    reason: "Unspecified safety concern"
+    pause_timestamp: "{{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -Iseconds')) }}"
+
+  tasks:
+    - name: Validate reason is provided
+      ansible.builtin.fail:
+        msg: "ABORT: Must provide reason. Use -e \"reason='Description of safety issue'\""
+      when: reason == "Unspecified safety concern"
+      run_once: true
+
+    - name: "PAUSE: Log pause initiation"
+      ansible.builtin.shell: |
+        echo "[{{ pause_timestamp }}] GLOBAL PAUSE INITIATED: {{ reason }}" >> /var/log/ciris/safety-events.log
+      ignore_errors: true
+
+    - name: "PAUSE: Stop CIRISProxy (LLM access)"
+      ansible.builtin.shell: |
+        cd /opt/ciris/proxy && docker compose -f docker-compose.prod.yml down
+      ignore_errors: true
+
+    - name: "PAUSE: Stop CIRISBilling (user auth/payments)"
+      ansible.builtin.shell: |
+        cd /opt/ciris/billing && docker compose down
+      ignore_errors: true
+
+    - name: "PAUSE: Stop Constellation DNS (discovery)"
+      ansible.builtin.shell: |
+        cd /opt/ciris/dns && docker compose down
+      ignore_errors: true
+
+    - name: "PAUSE: Verify services stopped"
+      ansible.builtin.shell: |
+        docker ps --filter "name=ciris-" --format "{{ '{{' }}.Names{{ '}}' }}"
+      register: running_containers
+
+    - name: "PAUSE: Report status"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          GLOBAL PAUSE COMPLETE - {{ inventory_hostname }}
+          ============================================================
+          Reason: {{ reason }}
+          Timestamp: {{ pause_timestamp }}
+
+          Running containers (should be empty or postgres only):
+          {{ running_containers.stdout | default('None') }}
+
+          NEXT STEPS:
+          1. Update status page: https://lens.ciris-services-1.ai
+          2. Investigate and resolve underlying issue
+          3. When resolved: ansible-playbook runbooks/safety-global-pause.yml --tags resume
+          ============================================================
+
+- name: "SAFETY - Resume Services"
+  hosts: all
+  gather_facts: false
+  tags: [resume, never]
+  vars:
+    resume_timestamp: "{{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -Iseconds')) }}"
+
+  tasks:
+    - name: "RESUME: Log resume initiation"
+      ansible.builtin.shell: |
+        echo "[{{ resume_timestamp }}] GLOBAL RESUME INITIATED" >> /var/log/ciris/safety-events.log
+      ignore_errors: true
+
+    - name: "RESUME: Start PostgreSQL first"
+      ansible.builtin.shell: |
+        cd /opt/ciris/billing && docker compose up -d postgres
+      ignore_errors: true
+
+    - name: "RESUME: Wait for PostgreSQL"
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: "RESUME: Start CIRISBilling"
+      ansible.builtin.shell: |
+        cd /opt/ciris/billing && docker compose up -d
+      ignore_errors: true
+
+    - name: "RESUME: Start CIRISProxy"
+      ansible.builtin.shell: |
+        cd /opt/ciris/proxy && docker compose -f docker-compose.prod.yml up -d
+      ignore_errors: true
+
+    - name: "RESUME: Start Constellation DNS"
+      ansible.builtin.shell: |
+        cd /opt/ciris/dns && docker compose up -d
+      ignore_errors: true
+
+    - name: "RESUME: Wait for services to initialize"
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: "RESUME: Verify services running"
+      ansible.builtin.shell: |
+        docker ps --filter "name=ciris-" --format "{{ '{{' }}.Names{{ '}}' }}: {{ '{{' }}.Status{{ '}}' }}"
+      register: container_status
+
+    - name: "RESUME: Health check - Billing"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8000/health"
+        method: GET
+        status_code: 200
+      register: billing_health
+      ignore_errors: true
+
+    - name: "RESUME: Health check - Proxy"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:4000/health/liveliness"
+        method: GET
+        status_code: 200
+      register: proxy_health
+      ignore_errors: true
+
+    - name: "RESUME: Report status"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          GLOBAL RESUME COMPLETE - {{ inventory_hostname }}
+          ============================================================
+          Timestamp: {{ resume_timestamp }}
+
+          Container Status:
+          {{ container_status.stdout }}
+
+          Health Checks:
+          - Billing: {{ 'OK' if billing_health.status == 200 else 'FAILED' }}
+          - Proxy: {{ 'OK' if proxy_health.status == 200 else 'FAILED' }}
+
+          NEXT STEPS:
+          1. Verify status page shows operational
+          2. Test user-facing functionality
+          3. Document incident resolution
+          ============================================================

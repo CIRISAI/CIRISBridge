@@ -1,0 +1,112 @@
+---
+# Warrant Canary Verification Runbook
+# CIRIS Safety Policy Transparency Commitment
+#
+# The warrant canary affirms CIRIS L3C has NOT received:
+#   - National Security Letters
+#   - FISA orders
+#   - Gag orders
+#   - Backdoor requests
+#   - Compulsion to weaken ethical constraints
+#
+# Must be updated every 90 days with cryptographic verification.
+#
+# Usage:
+#   # Check current canary status
+#   ansible-playbook -i inventory/production.yml runbooks/safety-warrant-canary.yml --tags check
+#
+#   # Verify canary is current (within 90 days)
+#   ansible-playbook -i inventory/production.yml runbooks/safety-warrant-canary.yml --tags verify
+
+- name: "WARRANT CANARY - Status Check"
+  hosts: localhost
+  gather_facts: true
+  tags: [check, verify]
+
+  vars:
+    canary_url: "https://ciris.ai/safety-policy/"
+    max_age_days: 90
+
+  tasks:
+    - name: "CANARY: Fetch current safety policy"
+      ansible.builtin.uri:
+        url: "{{ canary_url }}"
+        method: GET
+        return_content: true
+      register: safety_policy
+      ignore_errors: true
+
+    - name: "CANARY: Display verification checklist"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          CIRIS WARRANT CANARY VERIFICATION
+          ============================================================
+          Policy URL: {{ canary_url }}
+          Check Date: {{ ansible_date_time.date }}
+
+          CANARY AFFIRMS CIRIS L3C HAS NOT RECEIVED:
+          [ ] National Security Letters
+          [ ] FISA orders
+          [ ] Gag orders
+          [ ] Backdoor requests
+          [ ] Compulsion to weaken ethical constraints
+
+          VERIFICATION REQUIREMENTS:
+          [ ] Canary statement present on safety policy page
+          [ ] Statement dated within last 90 days
+          [ ] Cryptographic signature valid (if provided)
+
+          CANARY ABSENCE OR STALENESS INDICATES:
+          - Possible legal restriction on disclosure
+          - Per transparency policy: "silence indicates legal restrictions"
+
+          IF CANARY IS MISSING OR STALE:
+          1. Do NOT speculate publicly about reasons
+          2. Consult legal counsel
+          3. Follow global pause procedures if warranted
+
+          NEXT UPDATE DUE: Every 90 days from last statement
+          ============================================================
+
+    - name: "CANARY: Check if policy page accessible"
+      ansible.builtin.debug:
+        msg: "WARNING: Could not fetch safety policy page. Verify manually at {{ canary_url }}"
+      when: safety_policy.failed | default(false)
+
+- name: "WARRANT CANARY - Update Reminder"
+  hosts: localhost
+  gather_facts: true
+  tags: [reminder, never]
+
+  tasks:
+    - name: "REMINDER: Canary update checklist"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          WARRANT CANARY UPDATE PROCEDURE
+          ============================================================
+
+          To update the warrant canary (every 90 days):
+
+          1. VERIFY all statements remain true:
+             [ ] No National Security Letters received
+             [ ] No FISA orders received
+             [ ] No gag orders received
+             [ ] No backdoor requests received
+             [ ] No compulsion to weaken ethical constraints
+
+          2. UPDATE the safety policy page:
+             - Update date to current date
+             - Regenerate cryptographic signature if used
+
+          3. PUBLISH updated policy to ciris.ai/safety-policy/
+
+          4. ANNOUNCE update via appropriate channels
+
+          WARNING: If ANY statement is no longer true:
+          - Do NOT update the canary
+          - Consult legal counsel immediately
+          - The absence of update serves as the signal
+
+          ============================================================

@@ -1,0 +1,261 @@
+---
+# Billing Operations Runbook
+# Common database queries for billing troubleshooting
+# Reference: https://docs.ansible.com/ansible/2.8/user_guide/playbooks_best_practices.html
+#
+# Usage:
+#   # Look up user by external ID (Google ID)
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup -e "external_id=10942"
+#
+#   # Look up user by email
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup -e "email=user@example.com"
+#
+#   # Get user's usage history
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags usage -e "external_id=10942"
+#
+#   # Get user's tool credits
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags tools -e "external_id=10942"
+#
+#   # List recent transactions
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags transactions -e "limit=20"
+#
+#   # Get system stats
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags stats
+
+- name: "BILLING OPS - User Lookup"
+  hosts: vultr
+  gather_facts: false
+  tags: [lookup]
+  vars:
+    external_id: ""
+    email: ""
+
+  tasks:
+    - name: "LOOKUP: Find user by external_id"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            id,
+            external_id,
+            customer_email,
+            display_name,
+            balance_minor,
+            free_uses_remaining,
+            paid_credits,
+            daily_free_uses_remaining,
+            total_uses,
+            status,
+            created_at
+          FROM accounts
+          WHERE external_id LIKE '{{ external_id }}%'
+          ORDER BY created_at DESC
+          LIMIT 10;
+        "
+      register: user_result
+      when: external_id | length > 0
+
+    - name: "LOOKUP: Find user by email"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            id,
+            external_id,
+            customer_email,
+            display_name,
+            balance_minor,
+            free_uses_remaining,
+            paid_credits,
+            daily_free_uses_remaining,
+            total_uses,
+            status,
+            created_at
+          FROM accounts
+          WHERE customer_email ILIKE '%{{ email }}%'
+          ORDER BY created_at DESC
+          LIMIT 10;
+        "
+      register: email_result
+      when: email | length > 0
+
+    - name: "LOOKUP: Display results"
+      ansible.builtin.debug:
+        msg: "{{ user_result.stdout | default(email_result.stdout) | default('No search criteria provided. Use -e external_id=X or -e email=X') }}"
+
+- name: "BILLING OPS - Usage History"
+  hosts: vultr
+  gather_facts: false
+  tags: [usage, never]
+  vars:
+    external_id: ""
+    limit: 20
+
+  tasks:
+    - name: Validate external_id
+      ansible.builtin.fail:
+        msg: "Specify external_id: -e 'external_id=10942'"
+      when: external_id | length == 0
+
+    - name: "USAGE: Get LLM usage logs"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            l.id,
+            l.model,
+            l.input_tokens,
+            l.output_tokens,
+            l.cost_minor,
+            l.created_at
+          FROM llm_usage_logs l
+          JOIN accounts a ON l.account_id = a.id
+          WHERE a.external_id LIKE '{{ external_id }}%'
+          ORDER BY l.created_at DESC
+          LIMIT {{ limit }};
+        "
+      register: usage_result
+
+    - name: "USAGE: Display results"
+      ansible.builtin.debug:
+        msg: "{{ usage_result.stdout }}"
+
+- name: "BILLING OPS - Tool Credits"
+  hosts: vultr
+  gather_facts: false
+  tags: [tools, never]
+  vars:
+    external_id: ""
+
+  tasks:
+    - name: Validate external_id
+      ansible.builtin.fail:
+        msg: "Specify external_id: -e 'external_id=10942'"
+      when: external_id | length == 0
+
+    - name: "TOOLS: Get product inventory"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            p.product_type,
+            p.free_remaining,
+            p.paid_credits,
+            p.total_uses,
+            p.last_daily_refresh,
+            p.created_at
+          FROM product_inventory p
+          JOIN accounts a ON p.account_id = a.id
+          WHERE a.external_id LIKE '{{ external_id }}%';
+        "
+      register: inventory_result
+
+    - name: "TOOLS: Get recent tool usage"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            l.product_type,
+            l.used_free,
+            l.used_paid,
+            l.cost_minor,
+            l.created_at
+          FROM product_usage_logs l
+          JOIN accounts a ON l.account_id = a.id
+          WHERE a.external_id LIKE '{{ external_id }}%'
+          ORDER BY l.created_at DESC
+          LIMIT 20;
+        "
+      register: tool_usage_result
+
+    - name: "TOOLS: Display results"
+      ansible.builtin.debug:
+        msg: |
+          === Product Inventory ===
+          {{ inventory_result.stdout }}
+
+          === Recent Tool Usage ===
+          {{ tool_usage_result.stdout }}
+
+- name: "BILLING OPS - Recent Transactions"
+  hosts: vultr
+  gather_facts: false
+  tags: [transactions, never]
+  vars:
+    limit: 20
+
+  tasks:
+    - name: "TRANSACTIONS: Get recent charges"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            c.id,
+            a.external_id,
+            a.customer_email,
+            c.amount_minor,
+            c.currency,
+            c.status,
+            c.created_at
+          FROM charges c
+          JOIN accounts a ON c.account_id = a.id
+          ORDER BY c.created_at DESC
+          LIMIT {{ limit }};
+        "
+      register: charges_result
+
+    - name: "TRANSACTIONS: Display results"
+      ansible.builtin.debug:
+        msg: "{{ charges_result.stdout }}"
+
+- name: "BILLING OPS - System Stats"
+  hosts: vultr
+  gather_facts: false
+  tags: [stats, never]
+
+  tasks:
+    - name: "STATS: Get account statistics"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            COUNT(*) as total_accounts,
+            COUNT(*) FILTER (WHERE status = 'active') as active_accounts,
+            COUNT(*) FILTER (WHERE total_uses > 0) as accounts_with_usage,
+            SUM(total_uses) as total_llm_uses,
+            SUM(balance_minor) as total_balance_minor,
+            SUM(paid_credits) as total_paid_credits
+          FROM accounts;
+        "
+      register: account_stats
+
+    - name: "STATS: Get usage statistics (last 24h)"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            COUNT(*) as requests_24h,
+            COUNT(DISTINCT account_id) as unique_users_24h,
+            SUM(input_tokens + output_tokens) as total_tokens_24h,
+            SUM(cost_minor) as total_cost_minor_24h
+          FROM llm_usage_logs
+          WHERE created_at > NOW() - INTERVAL '24 hours';
+        "
+      register: usage_stats
+
+    - name: "STATS: Get tool usage statistics"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            product_type,
+            COUNT(*) as total_uses,
+            COUNT(*) FILTER (WHERE used_free) as free_uses,
+            COUNT(*) FILTER (WHERE used_paid) as paid_uses
+          FROM product_usage_logs
+          GROUP BY product_type;
+        "
+      register: tool_stats
+
+    - name: "STATS: Display results"
+      ansible.builtin.debug:
+        msg: |
+          === Account Statistics ===
+          {{ account_stats.stdout }}
+
+          === Usage (Last 24h) ===
+          {{ usage_stats.stdout }}
+
+          === Tool Usage by Product ===
+          {{ tool_stats.stdout }}

@@ -1,0 +1,196 @@
+---
+# Regional Service Pause Runbook
+# CIRIS Safety Policy: "Fix if we can. Pause only if we can't."
+#
+# This runbook implements REGIONAL service pause for jurisdiction-specific events.
+# Services continue operating in unaffected regions.
+#
+# REGIONAL PAUSE CONDITIONS (per ciris.ai/safety-policy/):
+#
+#   US (Chicago / Vultr):
+#     - Court orders requiring service suspension
+#     - Vultr infrastructure unavailability
+#     - US regulatory non-compliance
+#
+#   EU (Germany / Hetzner):
+#     - Court orders requiring service suspension
+#     - Hetzner infrastructure unavailability
+#     - GDPR or AI Act compliance failures
+#
+# Usage:
+#   # Pause US region only
+#   ansible-playbook -i inventory/production.yml runbooks/safety-regional-pause.yml --tags pause --limit us -e "reason='Court order compliance'"
+#
+#   # Pause EU region only
+#   ansible-playbook -i inventory/production.yml runbooks/safety-regional-pause.yml --tags pause --limit eu -e "reason='GDPR compliance review'"
+#
+#   # Resume specific region
+#   ansible-playbook -i inventory/production.yml runbooks/safety-regional-pause.yml --tags resume --limit us
+
+- name: "SAFETY - Regional Pause Assessment"
+  hosts: localhost
+  gather_facts: true
+  tags: [assess]
+
+  tasks:
+    - name: "ASSESS: Display regional pause checklist"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          CIRIS REGIONAL PAUSE ASSESSMENT
+          ============================================================
+
+          REGIONAL PAUSE preserves service in unaffected jurisdictions.
+          Use --limit us OR --limit eu to target specific region.
+
+          US REGION (Vultr Chicago) PAUSE CONDITIONS:
+          [ ] Court order requiring US service suspension
+          [ ] Vultr infrastructure failure/unavailability
+          [ ] US regulatory non-compliance issue
+
+          EU REGION (Hetzner Germany) PAUSE CONDITIONS:
+          [ ] Court order requiring EU service suspension
+          [ ] Hetzner infrastructure failure/unavailability
+          [ ] GDPR compliance failure
+          [ ] AI Act compliance failure
+
+          BEFORE REGIONAL PAUSE:
+          [ ] Confirm issue is jurisdiction-specific (not global)
+          [ ] Verify other region can handle redirected traffic
+          [ ] Update DNS/Cloudflare to route away from affected region
+          [ ] Document legal/compliance reference if applicable
+
+          EXECUTE:
+          # US pause:
+          ansible-playbook runbooks/safety-regional-pause.yml --tags pause --limit us -e "reason='...'"
+
+          # EU pause:
+          ansible-playbook runbooks/safety-regional-pause.yml --tags pause --limit eu -e "reason='...'"
+          ============================================================
+
+- name: "SAFETY - Regional Service Pause"
+  hosts: all
+  gather_facts: false
+  tags: [pause, never]
+  vars:
+    reason: "Unspecified regional concern"
+    pause_timestamp: "{{ lookup('pipe', 'date -Iseconds') }}"
+
+  tasks:
+    - name: Validate reason is provided
+      ansible.builtin.fail:
+        msg: "ABORT: Must provide reason. Use -e \"reason='Description of regional issue'\""
+      when: reason == "Unspecified regional concern"
+
+    - name: "PAUSE: Log regional pause"
+      ansible.builtin.shell: |
+        mkdir -p /var/log/ciris
+        echo "[{{ pause_timestamp }}] REGIONAL PAUSE ({{ region | default('unknown') }}): {{ reason }}" >> /var/log/ciris/safety-events.log
+      ignore_errors: true
+
+    - name: "PAUSE: Stop CIRISProxy"
+      ansible.builtin.shell: |
+        cd /opt/ciris/proxy && docker compose -f docker-compose.prod.yml down
+      ignore_errors: true
+
+    - name: "PAUSE: Stop CIRISBilling"
+      ansible.builtin.shell: |
+        cd /opt/ciris/billing && docker compose down
+      ignore_errors: true
+
+    - name: "PAUSE: Stop Constellation DNS"
+      ansible.builtin.shell: |
+        cd /opt/ciris/dns && docker compose down
+      ignore_errors: true
+
+    - name: "PAUSE: Report regional status"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          REGIONAL PAUSE COMPLETE - {{ inventory_hostname }} ({{ region | default('unknown') }})
+          ============================================================
+          Reason: {{ reason }}
+          Timestamp: {{ pause_timestamp }}
+          Region: {{ region | default('unknown') }}
+
+          TRAFFIC ROUTING:
+          - Update Cloudflare to remove this region from DNS
+          - Verify other region is handling traffic
+
+          DNS RECORDS TO UPDATE:
+          {% if region | default('') == 'us' %}
+          - billing1.ciris-services-1.ai -> Remove or point to EU
+          - proxy1.ciris-services-1.ai -> Remove or point to EU
+          {% elif region | default('') == 'eu' %}
+          - billing1.ciris-services-2.ai -> Remove or point to US
+          - proxy1.ciris-services-2.ai -> Remove or point to US
+          {% endif %}
+
+          RESUME WHEN RESOLVED:
+          ansible-playbook runbooks/safety-regional-pause.yml --tags resume --limit {{ region | default('this_region') }}
+          ============================================================
+
+- name: "SAFETY - Regional Service Resume"
+  hosts: all
+  gather_facts: false
+  tags: [resume, never]
+  vars:
+    resume_timestamp: "{{ lookup('pipe', 'date -Iseconds') }}"
+
+  tasks:
+    - name: "RESUME: Log regional resume"
+      ansible.builtin.shell: |
+        echo "[{{ resume_timestamp }}] REGIONAL RESUME ({{ region | default('unknown') }})" >> /var/log/ciris/safety-events.log
+      ignore_errors: true
+
+    - name: "RESUME: Start PostgreSQL"
+      ansible.builtin.shell: |
+        cd /opt/ciris/billing && docker compose up -d postgres
+      ignore_errors: true
+
+    - name: "RESUME: Wait for PostgreSQL"
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: "RESUME: Start CIRISBilling"
+      ansible.builtin.shell: |
+        cd /opt/ciris/billing && docker compose up -d
+      ignore_errors: true
+
+    - name: "RESUME: Start CIRISProxy"
+      ansible.builtin.shell: |
+        cd /opt/ciris/proxy && docker compose -f docker-compose.prod.yml up -d
+      ignore_errors: true
+
+    - name: "RESUME: Start Constellation DNS"
+      ansible.builtin.shell: |
+        cd /opt/ciris/dns && docker compose up -d
+      ignore_errors: true
+
+    - name: "RESUME: Wait for services"
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: "RESUME: Verify health"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8000/health"
+        method: GET
+        status_code: 200
+      register: health_check
+      ignore_errors: true
+
+    - name: "RESUME: Report status"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          REGIONAL RESUME COMPLETE - {{ inventory_hostname }} ({{ region | default('unknown') }})
+          ============================================================
+          Timestamp: {{ resume_timestamp }}
+          Health Check: {{ 'OK' if health_check.status == 200 else 'FAILED' }}
+
+          NEXT STEPS:
+          1. Re-enable DNS routing to this region in Cloudflare
+          2. Verify traffic is being served correctly
+          3. Monitor for any issues
+          4. Document resolution
+          ============================================================
