@@ -7,6 +7,8 @@ skip_list:
   # pause/resume operations continue even if individual steps fail
   - ignore-errors  # runbooks need to continue on failure
   - no-changed-when  # shell commands in runbooks are idempotent by nature
+  - run-once  # runbooks use run_once for validation tasks
+  - syntax-check[unknown-module]  # archive module may not be installed in lint env
 
 # Warn but don't fail on these
 warn_list:

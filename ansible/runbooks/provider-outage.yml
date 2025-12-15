@@ -238,11 +238,11 @@
           ============================================
 
 - name: "PROVIDER OUTAGE - Verify Recovered Region"
-  hosts: "{{ recovered_region | default('none') }}"
+  hosts: "{{ recovered_region | default('localhost', true) }}"
   gather_facts: false
   tags: [failback, never]
   vars:
-    recovered_region: ""
+    recovered_region: "localhost"
 
   tasks:
     - name: "VERIFY: Check recovered region services"
