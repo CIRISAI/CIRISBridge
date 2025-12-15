@@ -1,0 +1,202 @@
+---
+# Log Audit Runbook
+# Quick manual inspection of logs across all services
+#
+# Usage:
+#   # Full audit (all services, both regions)
+#   ansible-playbook -i inventory/production.yml runbooks/log-audit.yml
+#
+#   # Single region
+#   ansible-playbook -i inventory/production.yml runbooks/log-audit.yml --limit us
+#
+#   # Specific service
+#   ansible-playbook -i inventory/production.yml runbooks/log-audit.yml --tags billing
+#   ansible-playbook -i inventory/production.yml runbooks/log-audit.yml --tags proxy
+#   ansible-playbook -i inventory/production.yml runbooks/log-audit.yml --tags lens
+#   ansible-playbook -i inventory/production.yml runbooks/log-audit.yml --tags postgres
+#   ansible-playbook -i inventory/production.yml runbooks/log-audit.yml --tags caddy
+#
+#   # Errors only (quick check)
+#   ansible-playbook -i inventory/production.yml runbooks/log-audit.yml --tags errors
+#
+#   # Custom time window
+#   ansible-playbook -i inventory/production.yml runbooks/log-audit.yml -e "lines=200"
+#   ansible-playbook -i inventory/production.yml runbooks/log-audit.yml -e "since='1 hour ago'"
+
+- name: "LOG AUDIT - Service Health Check"
+  hosts: all
+  gather_facts: false
+  vars:
+    lines: 100
+    since: "24 hours ago"
+
+  tasks:
+    # =========================================================================
+    # ERRORS ONLY (quick check)
+    # =========================================================================
+    - name: "ERRORS: Scan all services for errors"
+      tags: [errors, never]
+      block:
+        - name: "ERRORS: Check all containers"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - ERROR SCAN ==="
+            echo ""
+            for container in ciris-billing ciris-proxy ciris-postgres ciris-caddy cirislens-api; do
+              if docker ps --format '{%raw%}{{.Names}}{%endraw%}' | grep -q "^${container}$"; then
+                count=$(docker logs "$container" --since "{{ since }}" 2>&1 | grep -ciE 'error|exception|fatal|panic|critical' || echo "0")
+                if [ "$count" -gt 0 ]; then
+                  echo "❌ $container: $count errors"
+                  docker logs "$container" --since "{{ since }}" 2>&1 | grep -iE 'error|exception|fatal|panic|critical' | tail -5
+                  echo ""
+                else
+                  echo "✓ $container: clean"
+                fi
+              fi
+            done
+          register: error_scan
+          changed_when: false
+          ignore_errors: true
+
+        - name: "ERRORS: Display results"
+          ansible.builtin.debug:
+            msg: "{{ error_scan.stdout }}"
+
+    # =========================================================================
+    # BILLING LOGS
+    # =========================================================================
+    - name: "BILLING: Get recent logs"
+      tags: [billing]
+      block:
+        - name: "BILLING: Fetch logs"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - BILLING LOGS ==="
+            docker logs ciris-billing --tail {{ lines }} 2>&1
+          register: billing_logs
+          changed_when: false
+          ignore_errors: true
+
+        - name: "BILLING: Display"
+          ansible.builtin.debug:
+            msg: "{{ billing_logs.stdout_lines[-50:] | join('\n') }}"
+          when: billing_logs is succeeded
+
+    # =========================================================================
+    # PROXY LOGS
+    # =========================================================================
+    - name: "PROXY: Get recent logs"
+      tags: [proxy]
+      block:
+        - name: "PROXY: Fetch logs"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - PROXY LOGS ==="
+            docker logs ciris-proxy --tail {{ lines }} 2>&1
+          register: proxy_logs
+          changed_when: false
+          ignore_errors: true
+
+        - name: "PROXY: Display"
+          ansible.builtin.debug:
+            msg: "{{ proxy_logs.stdout_lines[-50:] | join('\n') }}"
+          when: proxy_logs is succeeded
+
+    # =========================================================================
+    # LENS LOGS (US only)
+    # =========================================================================
+    - name: "LENS: Get recent logs"
+      tags: [lens]
+      when: inventory_hostname == 'vultr'
+      block:
+        - name: "LENS: Fetch API logs"
+          ansible.builtin.shell: |
+            echo "=== LENS API LOGS ==="
+            docker logs cirislens-api --tail {{ lines }} 2>&1
+          register: lens_logs
+          changed_when: false
+          ignore_errors: true
+
+        - name: "LENS: Display"
+          ansible.builtin.debug:
+            msg: "{{ lens_logs.stdout_lines[-50:] | join('\n') }}"
+          when: lens_logs is succeeded
+
+    # =========================================================================
+    # POSTGRES LOGS
+    # =========================================================================
+    - name: "POSTGRES: Get recent logs"
+      tags: [postgres]
+      block:
+        - name: "POSTGRES: Fetch logs"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - POSTGRES LOGS ==="
+            docker logs ciris-postgres --tail {{ lines }} 2>&1
+          register: postgres_logs
+          changed_when: false
+          ignore_errors: true
+
+        - name: "POSTGRES: Display"
+          ansible.builtin.debug:
+            msg: "{{ postgres_logs.stdout_lines[-50:] | join('\n') }}"
+          when: postgres_logs is succeeded
+
+    # =========================================================================
+    # CADDY LOGS
+    # =========================================================================
+    - name: "CADDY: Get recent logs"
+      tags: [caddy]
+      block:
+        - name: "CADDY: Fetch logs"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - CADDY LOGS ==="
+            docker logs ciris-caddy --tail {{ lines }} 2>&1
+          register: caddy_logs
+          changed_when: false
+          ignore_errors: true
+
+        - name: "CADDY: Display"
+          ansible.builtin.debug:
+            msg: "{{ caddy_logs.stdout_lines[-50:] | join('\n') }}"
+          when: caddy_logs is succeeded
+
+    # =========================================================================
+    # SYSTEM LOGS
+    # =========================================================================
+    - name: "SYSTEM: Get auth/security logs"
+      tags: [system, never]
+      block:
+        - name: "SYSTEM: Fetch auth logs"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - SYSTEM LOGS ==="
+            echo ""
+            echo "--- Failed SSH attempts ---"
+            grep -i "failed\|invalid" /var/log/auth.log 2>/dev/null | tail -20 || echo "No failures"
+            echo ""
+            echo "--- Fail2ban bans ---"
+            fail2ban-client status sshd 2>/dev/null | grep -E "Banned|Total" || echo "Fail2ban not running"
+            echo ""
+            echo "--- Recent logins ---"
+            last -10
+          register: system_logs
+          changed_when: false
+          ignore_errors: true
+
+        - name: "SYSTEM: Display"
+          ansible.builtin.debug:
+            msg: "{{ system_logs.stdout }}"
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: "SUMMARY: Quick health overview"
+      tags: [always]
+      block:
+        - name: "SUMMARY: Container status"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - CONTAINER STATUS ==="
+            docker ps --format "table {%raw%}{{.Names}}\t{{.Status}}\t{{.Ports}}{%endraw%}" | grep -E "ciris|lens" || echo "No CIRIS containers"
+          register: container_status
+          changed_when: false
+          ignore_errors: true
+
+        - name: "SUMMARY: Display"
+          ansible.builtin.debug:
+            msg: "{{ container_status.stdout }}"
