@@ -189,4 +189,4 @@ Apache 2.0 - See [LICENSE](LICENSE)
 
 ---
 
-*This infrastructure exists to be deleted. That's not a bug—it's the mission.*
+*Transitional infrastructure—designed to step aside as decentralized alternatives mature.*

@@ -243,4 +243,4 @@ Every change should consider:
 
 **Do not add features that would make retirement harder.**
 
-*This infrastructure exists to be deleted. That's not a bug - it's the mission.*
+*Transitional infrastructure—designed to step aside as decentralized alternatives mature.*

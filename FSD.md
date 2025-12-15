@@ -841,4 +841,4 @@ Migration considered successful when:
 
 ---
 
-*This infrastructure exists to be deleted. That's not a bug—it's the mission.*
+*Transitional infrastructure—designed to step aside as decentralized alternatives mature.*
