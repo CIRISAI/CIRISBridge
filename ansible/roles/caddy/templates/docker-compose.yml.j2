@@ -19,7 +19,7 @@ services:
     networks:
       - ciris
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:2019/config/"]
+      test: ["CMD", "caddy", "version"]
       interval: 30s
       timeout: 10s
       retries: 3
