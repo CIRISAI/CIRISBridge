@@ -12,8 +12,17 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
-log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_info() {
+    local msg="$1"
+    echo -e "${GREEN}[INFO]${NC} $msg"
+    return 0
+}
+
+log_error() {
+    local msg="$1"
+    echo -e "${RED}[ERROR]${NC} $msg" >&2
+    return 0
+}
 
 # Load configuration
 if [[ -f "$ROOT_DIR/terraform/terraform.tfstate" ]]; then

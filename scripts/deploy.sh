@@ -13,9 +13,23 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_info() {
+    local msg="$1"
+    echo -e "${GREEN}[INFO]${NC} $msg"
+    return 0
+}
+
+log_warn() {
+    local msg="$1"
+    echo -e "${YELLOW}[WARN]${NC} $msg" >&2
+    return 0
+}
+
+log_error() {
+    local msg="$1"
+    echo -e "${RED}[ERROR]${NC} $msg" >&2
+    return 0
+}
 
 # Check prerequisites
 check_prereqs() {
@@ -34,6 +48,7 @@ check_prereqs() {
     fi
 
     log_info "Prerequisites OK"
+    return 0
 }
 
 # Deploy infrastructure with Terraform
@@ -64,6 +79,7 @@ deploy_infra() {
     fi
 
     cd "$ROOT_DIR"
+    return 0
 }
 
 # Deploy all services with Ansible
@@ -76,6 +92,7 @@ deploy_services() {
 
     cd "$ROOT_DIR"
     log_info "Services deployed"
+    return 0
 }
 
 # Deploy DNS only
@@ -87,6 +104,7 @@ deploy_dns() {
     cd "$ROOT_DIR"
 
     log_info "DNS deployed"
+    return 0
 }
 
 # Deploy billing only
@@ -98,6 +116,7 @@ deploy_billing() {
     cd "$ROOT_DIR"
 
     log_info "Billing deployed"
+    return 0
 }
 
 # Deploy proxy only
@@ -109,6 +128,7 @@ deploy_proxy() {
     cd "$ROOT_DIR"
 
     log_info "Proxy deployed"
+    return 0
 }
 
 # Main
