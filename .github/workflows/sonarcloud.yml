@@ -13,6 +13,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Ansible collections
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install community.docker community.general
+
       - name: Run ansible-lint
         uses: ansible/ansible-lint@main
         with:
@@ -31,8 +36,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install ansible-lint
-        run: pip install ansible-lint
+      - name: Install ansible-lint and collections
+        run: |
+          pip install ansible-lint
+          ansible-galaxy collection install community.docker community.general
 
       - name: Run ansible-lint with JSON output
         run: |
