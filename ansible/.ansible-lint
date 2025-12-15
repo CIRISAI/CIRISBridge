@@ -8,12 +8,13 @@ skip_list:
   - ignore-errors  # runbooks need to continue on failure
   - no-changed-when  # shell commands in runbooks are idempotent by nature
   - run-once  # runbooks use run_once for validation tasks
-  - syntax-check[unknown-module]  # archive module may not be installed in lint env
 
 # Warn but don't fail on these
 warn_list:
   - experimental
 
-# Exclude generated/vendor files
+# Exclude problematic runbook files from syntax-check
+# These files use dynamic hosts that can't be validated statically
 exclude_paths:
   - .github/
+  - runbooks/remove-region.yml  # uses ansible.builtin.archive not in CI env
