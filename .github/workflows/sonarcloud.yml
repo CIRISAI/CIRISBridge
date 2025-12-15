@@ -16,7 +16,7 @@ jobs:
       - name: Install Ansible collections
         run: |
           pip install ansible-core
-          ansible-galaxy collection install community.docker community.general
+          ansible-galaxy collection install community.docker community.general ansible.posix
 
       - name: Run ansible-lint
         uses: ansible/ansible-lint@main
@@ -39,7 +39,7 @@ jobs:
       - name: Install ansible-lint and collections
         run: |
           pip install ansible-lint
-          ansible-galaxy collection install community.docker community.general
+          ansible-galaxy collection install community.docker community.general ansible.posix
 
       - name: Run ansible-lint with JSON output
         run: |

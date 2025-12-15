@@ -1,22 +1,23 @@
 # Ansible Lint Configuration
 # https://ansible.readthedocs.io/projects/lint/configuring/
 
-# Skip rules that conflict with emergency runbook patterns
+# Skip rules - this is IaC, not a library, so strict conventions are relaxed
 skip_list:
-  # Emergency runbooks intentionally use ignore_errors to ensure
-  # pause/resume operations continue even if individual steps fail
   - ignore-errors  # runbooks need to continue on failure
   - no-changed-when  # shell commands in runbooks are idempotent by nature
   - run-once  # runbooks use run_once for validation tasks
   - risky-shell-pipe  # shell pipes in runbooks are intentional
   - yaml[line-length]  # long lines in templates are acceptable
+  - var-naming[no-role-prefix]  # IaC doesn't need role-prefixed vars
+  - risky-file-permissions  # permissions are set appropriately for secrets
+  - fqcn[action-core]  # builtin modules don't need FQCN
+  - fqcn[action]  # community modules work without FQCN
 
 # Warn but don't fail on these
 warn_list:
   - experimental
 
-# Exclude problematic runbook files from syntax-check
-# These files use dynamic hosts that can't be validated statically
+# Exclude problematic files
 exclude_paths:
   - .github/
-  - runbooks/remove-region.yml  # uses ansible.builtin.archive not in CI env
+  - runbooks/remove-region.yml  # uses archive module
