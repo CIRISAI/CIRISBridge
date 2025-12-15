@@ -75,11 +75,18 @@
         mode: "0644"
       notify: Restart CIRISLens
 
-    - name: Copy Grafana alerting provisioning
+    - name: Copy Grafana alert rules
       ansible.builtin.copy:
-        src: alerting/
-        dest: /opt/ciris/lens/config/grafana/provisioning/alerting/
+        src: alerting/alerts.yaml
+        dest: /opt/ciris/lens/config/grafana/provisioning/alerting/alerts.yaml
         mode: "0644"
+      notify: Restart CIRISLens
+
+    - name: Template Grafana contact points (contains webhook secret)
+      ansible.builtin.template:
+        src: contactpoints.yaml.j2
+        dest: /opt/ciris/lens/config/grafana/provisioning/alerting/contactpoints.yaml
+        mode: "0600"
       notify: Restart CIRISLens
 
     - name: Copy TimescaleDB init script

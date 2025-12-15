@@ -11,11 +11,11 @@ contactPoints:
       - uid: discord-receiver
         type: discord
         settings:
-          url: https://discord.com/api/webhooks/1449073979196440781/S6EbCDjOYbmUA6srOxWEWZqqM8MA6yD-6fxqCfOoFsK4AzHkHVu5PflLGyRHLo5tx7Bi
+          url: {{ discord_webhook_url }}
           use_discord_username: true
           avatar_url: https://grafana.com/static/assets/img/fav32.png
-          title: '{{ template "default.title" . }}'
-          message: '{{ template "default.message" . }}'
+          title: '{{ "{{" }} template "default.title" . {{ "}}" }}'
+          message: '{{ "{{" }} template "default.message" . {{ "}}" }}'
         disableResolveMessage: false
 
 # Notification policies - route alerts to contact points
