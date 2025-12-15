@@ -55,3 +55,4 @@ logs/
 htmlcov/
 .coverage
 ansible/.ansible_cache/
+ansible/.ansible/
