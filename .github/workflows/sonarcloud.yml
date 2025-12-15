@@ -7,6 +7,17 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    name: Ansible Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run ansible-lint
+        uses: ansible/ansible-lint@main
+        with:
+          working_directory: ansible
+
   sonarcloud:
     name: SonarCloud Analysis
     runs-on: ubuntu-latest
@@ -20,11 +31,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install -e ".[dev]" || pip install -e .
+      - name: Install ansible-lint
+        run: pip install ansible-lint
 
-      - name: Run tests with coverage
-        run: pytest --cov --cov-report=xml || true
+      - name: Run ansible-lint with JSON output
+        run: |
+          cd ansible
+          ansible-lint --format json --output-file ../ansible-lint-report.json . || true
 
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@v6
