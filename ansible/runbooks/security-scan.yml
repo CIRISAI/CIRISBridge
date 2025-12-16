@@ -1,0 +1,603 @@
+---
+# Security Scan Runbook
+# Infrastructure security posture assessment
+#
+# IMPORTANT: This is a READ-ONLY scanning tool.
+# No changes are made to the infrastructure.
+#
+# Expected open ports per node:
+#   22   - SSH (secured with key auth, fail2ban)
+#   53   - Constellation DNS (UDP/TCP)
+#   80   - HTTP (ACME challenges only, redirects to 443)
+#   443  - HTTPS (Caddy reverse proxy)
+#   5432 - PostgreSQL (internal + replication between nodes)
+#
+# Usage:
+#   # Quick security status
+#   ansible-playbook -i inventory/production.yml runbooks/security-scan.yml --tags status
+#
+#   # Detailed port scan and unexpected listeners
+#   ansible-playbook -i inventory/production.yml runbooks/security-scan.yml --tags ports
+#
+#   # Check for available security updates
+#   ansible-playbook -i inventory/production.yml runbooks/security-scan.yml --tags packages
+#
+#   # SSH configuration audit
+#   ansible-playbook -i inventory/production.yml runbooks/security-scan.yml --tags ssh
+#
+#   # Docker daemon security check
+#   ansible-playbook -i inventory/production.yml runbooks/security-scan.yml --tags docker
+#
+#   # Complete security scan (all checks)
+#   ansible-playbook -i inventory/production.yml runbooks/security-scan.yml --tags full
+#
+#   # Single region
+#   ansible-playbook -i inventory/production.yml runbooks/security-scan.yml --limit us
+
+- name: "SECURITY SCAN - Infrastructure Security Posture Assessment"
+  hosts: all
+  gather_facts: false
+  vars:
+    # Expected open ports
+    expected_ports:
+      - 22    # SSH
+      - 53    # DNS
+      - 80    # HTTP (ACME)
+      - 443   # HTTPS
+      - 5432  # PostgreSQL
+
+  tasks:
+    # =========================================================================
+    # STATUS - Quick security overview
+    # =========================================================================
+    - name: "STATUS: Quick security overview"
+      tags: [status, always]
+      block:
+        - name: "STATUS: Gather security metrics"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - SECURITY STATUS ==="
+            echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+
+            # Listening ports
+            echo "--- LISTENING PORTS ---"
+            ss -tuln | grep LISTEN | awk '{print $5}' | sed 's/.*://' | sort -n | uniq | tr '\n' ' '
+            echo ""
+            echo ""
+
+            # SSH status
+            echo "--- SSH SECURITY ---"
+            if grep -q "^PermitRootLogin no" /etc/ssh/sshd_config 2>/dev/null; then
+              echo "✓ Root login disabled"
+            else
+              echo "⚠ WARNING: Root login may be enabled"
+            fi
+
+            if grep -q "^PasswordAuthentication no" /etc/ssh/sshd_config 2>/dev/null; then
+              echo "✓ Password authentication disabled"
+            else
+              echo "⚠ WARNING: Password authentication may be enabled"
+            fi
+            echo ""
+
+            # Fail2ban status
+            echo "--- FAIL2BAN STATUS ---"
+            if systemctl is-active --quiet fail2ban 2>/dev/null; then
+              echo "✓ fail2ban is running"
+              BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned:" | awk '{print $NF}')
+              TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned:" | awk '{print $NF}')
+              echo "  Currently banned: ${BANNED:-0}"
+              echo "  Total banned: ${TOTAL_BANNED:-0}"
+            else
+              echo "⚠ WARNING: fail2ban not running"
+            fi
+            echo ""
+
+            # Firewall status
+            echo "--- FIREWALL STATUS ---"
+            if command -v ufw &> /dev/null; then
+              UFW_STATUS=$(ufw status 2>/dev/null | head -1)
+              echo "UFW: $UFW_STATUS"
+            elif command -v iptables &> /dev/null; then
+              RULE_COUNT=$(iptables -L | grep -c "^Chain")
+              echo "iptables: $RULE_COUNT chains configured"
+            else
+              echo "⚠ WARNING: No firewall detected"
+            fi
+            echo ""
+
+            # Failed SSH attempts (last 24h)
+            echo "--- RECENT SSH FAILURES ---"
+            FAILED=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null || echo "0")
+            INVALID=$(grep -c "Invalid user" /var/log/auth.log 2>/dev/null || echo "0")
+            echo "Failed password attempts: $FAILED"
+            echo "Invalid user attempts: $INVALID"
+            echo ""
+
+            # Security updates available
+            echo "--- SECURITY UPDATES ---"
+            apt-get update -qq 2>/dev/null
+            SECURITY_UPDATES=$(apt-get upgrade -s 2>/dev/null | grep -c "^Inst.*security" || echo "0")
+            if [ "$SECURITY_UPDATES" -gt 0 ]; then
+              echo "⚠ WARNING: $SECURITY_UPDATES security updates available"
+            else
+              echo "✓ System is up to date"
+            fi
+            echo ""
+
+            # Docker socket permissions
+            echo "--- DOCKER SECURITY ---"
+            if [ -S /var/run/docker.sock ]; then
+              SOCK_PERMS=$(stat -c "%a" /var/run/docker.sock)
+              echo "Docker socket permissions: $SOCK_PERMS"
+              if [ "$SOCK_PERMS" = "660" ] || [ "$SOCK_PERMS" = "600" ]; then
+                echo "✓ Docker socket has restricted permissions"
+              else
+                echo "⚠ WARNING: Docker socket may be too permissive"
+              fi
+            fi
+          register: status
+          changed_when: false
+
+        - name: "STATUS: Display"
+          ansible.builtin.debug:
+            msg: "{{ status.stdout }}"
+
+    # =========================================================================
+    # PORTS - Detailed port analysis
+    # =========================================================================
+    - name: "PORTS: Detailed port analysis and unexpected listeners"
+      tags: [ports, full, never]
+      block:
+        - name: "PORTS: Analyze listening ports"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - PORT ANALYSIS ==="
+            echo ""
+
+            # All listening ports with process info
+            echo "--- ALL LISTENING PORTS ---"
+            ss -tulnp | grep LISTEN
+            echo ""
+
+            # Check for unexpected ports
+            echo "--- PORT VALIDATION ---"
+            EXPECTED_PORTS=(22 53 80 443 5432 6379)
+            WARNINGS=""
+
+            while read -r port; do
+              if [ -z "$port" ]; then continue; fi
+
+              # Check if port is expected
+              is_expected=false
+              for expected in "${EXPECTED_PORTS[@]}"; do
+                if [ "$port" = "$expected" ]; then
+                  is_expected=true
+                  break
+                fi
+              done
+
+              if [ "$is_expected" = false ]; then
+                PROCESS=$(ss -tulnp | grep ":$port " | grep -oE 'users:\(\(.*\)\)' | head -1)
+                WARNINGS="${WARNINGS}⚠ WARNING: Unexpected port $port listening - $PROCESS\n"
+              fi
+            done < <(ss -tuln | grep LISTEN | awk '{print $5}' | sed 's/.*://' | sort -n | uniq)
+
+            if [ -n "$WARNINGS" ]; then
+              echo -e "$WARNINGS"
+            else
+              echo "✓ All listening ports are expected"
+            fi
+            echo ""
+
+            # Port grouping by service
+            echo "--- PORTS BY SERVICE ---"
+            echo "SSH (22):"
+            ss -tulnp | grep ":22 " || echo "  Not listening"
+            echo ""
+            echo "DNS (53):"
+            ss -tulnp | grep ":53 " || echo "  Not listening"
+            echo ""
+            echo "HTTP (80):"
+            ss -tulnp | grep ":80 " || echo "  Not listening"
+            echo ""
+            echo "HTTPS (443):"
+            ss -tulnp | grep ":443 " || echo "  Not listening"
+            echo ""
+            echo "PostgreSQL (5432):"
+            ss -tulnp | grep ":5432 " || echo "  Not listening"
+            echo ""
+            echo "Redis (6379):"
+            ss -tulnp | grep ":6379 " || echo "  Not listening"
+            echo ""
+
+            # External accessibility check
+            echo "--- EXTERNAL ACCESSIBILITY ---"
+            echo "Checking which ports are accessible from outside..."
+            ss -tuln | grep LISTEN | grep -E "0.0.0.0|:::" | awk '{print $5}' | sed 's/.*://' | sort -u | while read port; do
+              case $port in
+                22|53|80|443)
+                  echo "✓ Port $port externally accessible (expected)"
+                  ;;
+                5432)
+                  echo "⚠ WARNING: PostgreSQL (5432) externally accessible - should be internal only"
+                  ;;
+                6379)
+                  echo "⚠ WARNING: Redis (6379) externally accessible - should be internal only"
+                  ;;
+                *)
+                  echo "⚠ WARNING: Port $port externally accessible (unexpected)"
+                  ;;
+              esac
+            done
+          register: ports
+          changed_when: false
+
+        - name: "PORTS: Display"
+          ansible.builtin.debug:
+            msg: "{{ ports.stdout }}"
+
+    # =========================================================================
+    # PACKAGES - Security update check
+    # =========================================================================
+    - name: "PACKAGES: Check for security updates"
+      tags: [packages, full, never]
+      block:
+        - name: "PACKAGES: Check available updates"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - PACKAGE SECURITY ==="
+            echo ""
+
+            # Update package cache
+            echo "Updating package cache..."
+            apt-get update -qq 2>/dev/null
+            echo ""
+
+            # Check for security updates
+            echo "--- SECURITY UPDATES AVAILABLE ---"
+            apt-get upgrade -s 2>/dev/null | grep "^Inst" | grep -i security || echo "✓ No security updates available"
+            echo ""
+
+            # Summary
+            SECURITY_COUNT=$(apt-get upgrade -s 2>/dev/null | grep -c "^Inst.*security" || echo "0")
+            TOTAL_COUNT=$(apt-get upgrade -s 2>/dev/null | grep -c "^Inst" || echo "0")
+            echo "--- UPDATE SUMMARY ---"
+            echo "Security updates: $SECURITY_COUNT"
+            echo "Total updates: $TOTAL_COUNT"
+            echo ""
+
+            # Critical packages
+            echo "--- CRITICAL PACKAGE VERSIONS ---"
+            dpkg -l | grep -E "^ii" | grep -E "openssh-server|docker|fail2ban|postgresql|caddy" | awk '{print $2, $3}'
+            echo ""
+
+            # Check for outdated Docker images
+            echo "--- DOCKER IMAGE STATUS ---"
+            for image in $(docker images --format "{{.Repository}}:{{.Tag}}" | grep -E "ciris|postgres|redis|caddy"); do
+              echo "Checking $image..."
+              # Note: This only checks locally, not remote registry
+            done
+            docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.CreatedAt}}" | grep -E "ciris|postgres|redis|caddy|constellation"
+          register: packages
+          changed_when: false
+
+        - name: "PACKAGES: Display"
+          ansible.builtin.debug:
+            msg: "{{ packages.stdout }}"
+
+    # =========================================================================
+    # SSH - SSH configuration audit
+    # =========================================================================
+    - name: "SSH: SSH configuration security audit"
+      tags: [ssh, full, never]
+      block:
+        - name: "SSH: Audit SSH configuration"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - SSH SECURITY AUDIT ==="
+            echo ""
+
+            SSH_CONFIG="/etc/ssh/sshd_config"
+            WARNINGS=""
+
+            # Check PermitRootLogin
+            echo "--- ROOT LOGIN ---"
+            ROOT_LOGIN=$(grep "^PermitRootLogin" "$SSH_CONFIG" 2>/dev/null || echo "not set")
+            if echo "$ROOT_LOGIN" | grep -q "no"; then
+              echo "✓ Root login disabled"
+            else
+              echo "⚠ WARNING: Root login not explicitly disabled"
+              echo "  Current: $ROOT_LOGIN"
+              WARNINGS="${WARNINGS}Root login not disabled\n"
+            fi
+            echo ""
+
+            # Check PasswordAuthentication
+            echo "--- PASSWORD AUTHENTICATION ---"
+            PASS_AUTH=$(grep "^PasswordAuthentication" "$SSH_CONFIG" 2>/dev/null || echo "not set")
+            if echo "$PASS_AUTH" | grep -q "no"; then
+              echo "✓ Password authentication disabled"
+            else
+              echo "⚠ WARNING: Password authentication not explicitly disabled"
+              echo "  Current: $PASS_AUTH"
+              WARNINGS="${WARNINGS}Password authentication not disabled\n"
+            fi
+            echo ""
+
+            # Check PubkeyAuthentication
+            echo "--- PUBLIC KEY AUTHENTICATION ---"
+            PUBKEY_AUTH=$(grep "^PubkeyAuthentication" "$SSH_CONFIG" 2>/dev/null || echo "PubkeyAuthentication yes (default)")
+            echo "$PUBKEY_AUTH"
+            if echo "$PUBKEY_AUTH" | grep -q "no"; then
+              echo "⚠ WARNING: Public key authentication disabled"
+              WARNINGS="${WARNINGS}Public key authentication disabled\n"
+            else
+              echo "✓ Public key authentication enabled"
+            fi
+            echo ""
+
+            # Check SSH protocol version
+            echo "--- SSH PROTOCOL ---"
+            PROTOCOL=$(grep "^Protocol" "$SSH_CONFIG" 2>/dev/null || echo "Protocol 2 (default)")
+            echo "$PROTOCOL"
+            if echo "$PROTOCOL" | grep -q "1"; then
+              echo "⚠ WARNING: SSH Protocol 1 enabled (insecure)"
+              WARNINGS="${WARNINGS}SSH Protocol 1 enabled\n"
+            fi
+            echo ""
+
+            # Check permitted ciphers
+            echo "--- CIPHERS AND KEX ---"
+            CIPHERS=$(grep "^Ciphers" "$SSH_CONFIG" 2>/dev/null || echo "Using defaults")
+            echo "Ciphers: $CIPHERS"
+            KEX=$(grep "^KexAlgorithms" "$SSH_CONFIG" 2>/dev/null || echo "Using defaults")
+            echo "KexAlgorithms: $KEX"
+            echo ""
+
+            # Check MaxAuthTries
+            echo "--- AUTHENTICATION ATTEMPTS ---"
+            MAX_AUTH=$(grep "^MaxAuthTries" "$SSH_CONFIG" 2>/dev/null || echo "MaxAuthTries 6 (default)")
+            echo "$MAX_AUTH"
+            MAX_NUM=$(echo "$MAX_AUTH" | grep -oE '[0-9]+')
+            if [ "${MAX_NUM:-6}" -gt 3 ]; then
+              echo "ℹ INFO: Consider reducing MaxAuthTries to 3"
+            fi
+            echo ""
+
+            # Check authorized_keys
+            echo "--- AUTHORIZED KEYS ---"
+            if [ -f /root/.ssh/authorized_keys ]; then
+              KEY_COUNT=$(grep -c "^ssh-" /root/.ssh/authorized_keys 2>/dev/null || echo "0")
+              echo "Root authorized keys: $KEY_COUNT"
+              PERMS=$(stat -c "%a" /root/.ssh/authorized_keys)
+              if [ "$PERMS" = "600" ]; then
+                echo "✓ Correct permissions on authorized_keys ($PERMS)"
+              else
+                echo "⚠ WARNING: Incorrect permissions on authorized_keys ($PERMS, should be 600)"
+                WARNINGS="${WARNINGS}authorized_keys has wrong permissions\n"
+              fi
+            else
+              echo "⚠ WARNING: No authorized_keys file found for root"
+            fi
+            echo ""
+
+            # Check for other users with SSH access
+            echo "--- USERS WITH SSH ACCESS ---"
+            getent passwd | awk -F: '$3 >= 1000 {print $1}' | while read user; do
+              if [ -f "/home/$user/.ssh/authorized_keys" ]; then
+                KEY_COUNT=$(grep -c "^ssh-" "/home/$user/.ssh/authorized_keys" 2>/dev/null || echo "0")
+                echo "$user: $KEY_COUNT authorized keys"
+              fi
+            done
+            echo ""
+
+            # Recent SSH activity
+            echo "--- RECENT SSH ACTIVITY ---"
+            echo "Successful logins (last 10):"
+            last -10 | grep -E "pts|tty" || echo "None"
+            echo ""
+            echo "Failed login attempts (last 24h):"
+            FAILED=$(grep "Failed password" /var/log/auth.log 2>/dev/null | tail -5)
+            if [ -n "$FAILED" ]; then
+              echo "$FAILED"
+            else
+              echo "✓ No failed attempts"
+            fi
+            echo ""
+
+            # Summary
+            echo "--- SECURITY SUMMARY ---"
+            if [ -z "$WARNINGS" ]; then
+              echo "✓ SSH configuration follows security best practices"
+            else
+              echo "⚠ WARNINGS FOUND:"
+              echo -e "$WARNINGS"
+            fi
+          register: ssh_audit
+          changed_when: false
+
+        - name: "SSH: Display"
+          ansible.builtin.debug:
+            msg: "{{ ssh_audit.stdout }}"
+
+    # =========================================================================
+    # DOCKER - Docker daemon security
+    # =========================================================================
+    - name: "DOCKER: Docker daemon security check"
+      tags: [docker, full, never]
+      block:
+        - name: "DOCKER: Audit Docker security"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - DOCKER SECURITY AUDIT ==="
+            echo ""
+
+            WARNINGS=""
+
+            # Docker socket permissions
+            echo "--- DOCKER SOCKET ---"
+            if [ -S /var/run/docker.sock ]; then
+              PERMS=$(stat -c "%a" /var/run/docker.sock)
+              OWNER=$(stat -c "%U:%G" /var/run/docker.sock)
+              echo "Socket: /var/run/docker.sock"
+              echo "Permissions: $PERMS"
+              echo "Owner: $OWNER"
+
+              if [ "$PERMS" = "660" ] || [ "$PERMS" = "600" ]; then
+                echo "✓ Socket has restricted permissions"
+              else
+                echo "⚠ WARNING: Socket permissions may be too permissive"
+                WARNINGS="${WARNINGS}Docker socket has permissive permissions ($PERMS)\n"
+              fi
+            else
+              echo "⚠ Docker socket not found"
+            fi
+            echo ""
+
+            # Docker daemon configuration
+            echo "--- DOCKER DAEMON CONFIG ---"
+            if [ -f /etc/docker/daemon.json ]; then
+              echo "Config file exists: /etc/docker/daemon.json"
+              cat /etc/docker/daemon.json 2>/dev/null || echo "Cannot read config"
+            else
+              echo "ℹ INFO: No custom daemon.json (using defaults)"
+            fi
+            echo ""
+
+            # Check for privileged containers
+            echo "--- PRIVILEGED CONTAINERS ---"
+            PRIVILEGED=$(docker ps --format "{{.Names}}" --filter "status=running" | while read container; do
+              if docker inspect "$container" --format '{{.HostConfig.Privileged}}' 2>/dev/null | grep -q "true"; then
+                echo "$container"
+              fi
+            done)
+
+            if [ -n "$PRIVILEGED" ]; then
+              echo "⚠ WARNING: Privileged containers found:"
+              echo "$PRIVILEGED"
+              WARNINGS="${WARNINGS}Privileged containers running\n"
+            else
+              echo "✓ No privileged containers"
+            fi
+            echo ""
+
+            # Check container capabilities
+            echo "--- CONTAINER CAPABILITIES ---"
+            docker ps --format "{{.Names}}" --filter "status=running" | while read container; do
+              echo "$container:"
+              CAPS=$(docker inspect "$container" --format '{{.HostConfig.CapAdd}}' 2>/dev/null)
+              if [ "$CAPS" = "[]" ] || [ "$CAPS" = "<no value>" ]; then
+                echo "  ✓ No additional capabilities"
+              else
+                echo "  Capabilities: $CAPS"
+              fi
+            done
+            echo ""
+
+            # Check for containers running as root
+            echo "--- CONTAINER USER ---"
+            docker ps --format "{{.Names}}" --filter "status=running" | while read container; do
+              USER=$(docker inspect "$container" --format '{{.Config.User}}' 2>/dev/null)
+              if [ -z "$USER" ]; then
+                echo "$container: ⚠ Running as root (no user specified)"
+              else
+                echo "$container: ✓ Running as user $USER"
+              fi
+            done
+            echo ""
+
+            # Check host network mode
+            echo "--- NETWORK MODE ---"
+            HOST_NET=$(docker ps --format "{{.Names}}" --filter "status=running" | while read container; do
+              if docker inspect "$container" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null | grep -q "host"; then
+                echo "$container"
+              fi
+            done)
+
+            if [ -n "$HOST_NET" ]; then
+              echo "ℹ INFO: Containers using host network:"
+              echo "$HOST_NET"
+              echo "(This may be expected for DNS/network services)"
+            else
+              echo "✓ No containers using host network mode"
+            fi
+            echo ""
+
+            # Check volume mounts
+            echo "--- SENSITIVE VOLUME MOUNTS ---"
+            docker ps --format "{{.Names}}" --filter "status=running" | while read container; do
+              MOUNTS=$(docker inspect "$container" --format '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' 2>/dev/null)
+              if echo "$MOUNTS" | grep -qE "/etc|/root|/var/run/docker.sock"; then
+                echo "$container:"
+                echo "  ⚠ WARNING: Sensitive mounts detected"
+                echo "$MOUNTS" | tr ' ' '\n' | grep -E "/etc|/root|/var/run/docker.sock" | sed 's/^/    /'
+              fi
+            done
+            echo ""
+
+            # Docker version
+            echo "--- DOCKER VERSION ---"
+            docker version --format '{{.Server.Version}}' 2>/dev/null || echo "Cannot determine version"
+            echo ""
+
+            # Image security
+            echo "--- IMAGE SOURCES ---"
+            docker images --format "{{.Repository}}" | sort -u | while read repo; do
+              if echo "$repo" | grep -qE "^(localhost|[0-9]+\.)"; then
+                echo "⚠ Local/private registry: $repo"
+              elif echo "$repo" | grep -qE "ghcr.io|docker.io"; then
+                echo "✓ Trusted registry: $repo"
+              else
+                echo "ℹ INFO: Unknown registry: $repo"
+              fi
+            done
+            echo ""
+
+            # Summary
+            echo "--- SECURITY SUMMARY ---"
+            if [ -z "$WARNINGS" ]; then
+              echo "✓ Docker configuration follows security best practices"
+            else
+              echo "⚠ WARNINGS FOUND:"
+              echo -e "$WARNINGS"
+            fi
+          register: docker_audit
+          changed_when: false
+
+        - name: "DOCKER: Display"
+          ansible.builtin.debug:
+            msg: "{{ docker_audit.stdout }}"
+
+    # =========================================================================
+    # FULL - Complete security scan
+    # =========================================================================
+    - name: "FULL: Complete security scan summary"
+      tags: [full, never]
+      block:
+        - name: "FULL: Generate summary report"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - COMPLETE SECURITY SCAN SUMMARY ==="
+            echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+            echo "All detailed checks have been run above. Key findings:"
+            echo ""
+
+            # Count warnings across all checks
+            echo "This scan checked:"
+            echo "  ✓ Listening ports and unexpected services"
+            echo "  ✓ Available security updates"
+            echo "  ✓ SSH configuration hardening"
+            echo "  ✓ Docker daemon and container security"
+            echo "  ✓ Firewall and fail2ban status"
+            echo ""
+            echo "Review the detailed output above for specific findings."
+            echo ""
+            echo "RECOMMENDED ACTIONS:"
+            echo "1. Apply security updates if available (--tags packages)"
+            echo "2. Review any unexpected listening ports (--tags ports)"
+            echo "3. Ensure SSH hardening is complete (--tags ssh)"
+            echo "4. Verify fail2ban is blocking attacks (check /var/log/auth.log)"
+            echo "5. Schedule regular security scans (weekly recommended)"
+          register: full_summary
+          changed_when: false
+
+        - name: "FULL: Display summary"
+          ansible.builtin.debug:
+            msg: "{{ full_summary.stdout }}"
