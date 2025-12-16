@@ -51,7 +51,7 @@
     us_only_services:
       lens_api:
         container: cirislens-api
-        image: ghcr.io/cirisai/cirislens-api:latest
+        image: ghcr.io/cirisai/cirislens:latest
         compose_dir: /opt/ciris/lens
       lens_db:
         container: cirislens-db
