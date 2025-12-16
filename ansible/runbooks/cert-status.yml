@@ -35,31 +35,19 @@
       block:
         - name: "STATUS: Check certificate expiration for all domains"
           ansible.builtin.shell: |
-            set -e
             echo "=== {{ inventory_hostname | upper }} - CERTIFICATE STATUS ==="
             echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             echo ""
 
             # Define domains based on node
             {% if inventory_hostname == 'vultr' %}
-            DOMAINS=(
-              "billing1.{{ primary_domain }}"
-              "proxy1.{{ primary_domain }}"
-              "agents.{{ primary_domain }}"
-              "lens.{{ primary_domain }}"
-              "{{ primary_domain }}"
-            )
+            DOMAINS="billing1.{{ primary_domain }} proxy1.{{ primary_domain }} agents.{{ primary_domain }} lens.{{ primary_domain }} {{ primary_domain }}"
             {% else %}
-            DOMAINS=(
-              "billing1.{{ secondary_domain }}"
-              "proxy1.{{ secondary_domain }}"
-              "agents.{{ secondary_domain }}"
-              "{{ secondary_domain }}"
-            )
+            DOMAINS="billing1.{{ secondary_domain }} proxy1.{{ secondary_domain }} agents.{{ secondary_domain }} {{ secondary_domain }}"
             {% endif %}
 
-            check_cert() {
-              local domain=$1
+            FAILED=0
+            for domain in $DOMAINS; do
               echo "--- $domain ---"
 
               # Get certificate info
@@ -71,14 +59,15 @@
                 echo "  - Domain not resolving to this server"
                 echo "  - Caddy not running"
                 echo "  - Certificate not yet issued"
-                return 1
+                FAILED=$((FAILED + 1))
+                echo ""
+                continue
               fi
 
               # Extract dates
               NOT_BEFORE=$(echo "$CERT_INFO" | grep "notBefore" | cut -d= -f2)
               NOT_AFTER=$(echo "$CERT_INFO" | grep "notAfter" | cut -d= -f2)
               ISSUER=$(echo "$CERT_INFO" | grep "issuer" | sed 's/issuer=//')
-              SUBJECT=$(echo "$CERT_INFO" | grep "subject" | sed 's/subject=//')
 
               # Calculate days remaining
               EXPIRY_EPOCH=$(date -d "$NOT_AFTER" +%s 2>/dev/null || echo 0)
@@ -102,12 +91,6 @@
               echo "Days remaining: $DAYS_REMAINING"
               echo "Issuer: $ISSUER"
               echo ""
-            }
-
-            # Check all domains
-            FAILED=0
-            for domain in "${DOMAINS[@]}"; do
-              check_cert "$domain" || FAILED=$((FAILED + 1))
             done
 
             if [ $FAILED -gt 0 ]; then
@@ -130,38 +113,25 @@
       block:
         - name: "EXPIRING: Detect certificates expiring soon"
           ansible.builtin.shell: |
-            set -e
             echo "=== {{ inventory_hostname | upper }} - EXPIRING CERTIFICATES ==="
             echo "Checking for certificates expiring within {{ warning_days }} days"
             echo ""
 
             # Define domains based on node
             {% if inventory_hostname == 'vultr' %}
-            DOMAINS=(
-              "billing1.{{ primary_domain }}"
-              "proxy1.{{ primary_domain }}"
-              "agents.{{ primary_domain }}"
-              "lens.{{ primary_domain }}"
-              "{{ primary_domain }}"
-            )
+            DOMAINS="billing1.{{ primary_domain }} proxy1.{{ primary_domain }} agents.{{ primary_domain }} lens.{{ primary_domain }} {{ primary_domain }}"
             {% else %}
-            DOMAINS=(
-              "billing1.{{ secondary_domain }}"
-              "proxy1.{{ secondary_domain }}"
-              "agents.{{ secondary_domain }}"
-              "{{ secondary_domain }}"
-            )
+            DOMAINS="billing1.{{ secondary_domain }} proxy1.{{ secondary_domain }} agents.{{ secondary_domain }} {{ secondary_domain }}"
             {% endif %}
 
-            check_expiring() {
-              local domain=$1
-
+            EXPIRING_COUNT=0
+            for domain in $DOMAINS; do
               # Get certificate expiration
               NOT_AFTER=$(echo | timeout 5 openssl s_client -servername "$domain" -connect "$domain:443" 2>/dev/null | openssl x509 -noout -dates 2>/dev/null | grep "notAfter" | cut -d= -f2 || echo "")
 
               if [ -z "$NOT_AFTER" ]; then
                 echo "FAILED: $domain - Cannot retrieve certificate"
-                return 1
+                continue
               fi
 
               # Calculate days remaining
@@ -172,22 +142,12 @@
               # Only show if expiring within threshold
               if [ "$DAYS_REMAINING" -lt 0 ]; then
                 echo "EXPIRED: $domain - Expired $((-DAYS_REMAINING)) days ago on $NOT_AFTER"
-                return 0
+                EXPIRING_COUNT=$((EXPIRING_COUNT + 1))
               elif [ "$DAYS_REMAINING" -le {{ critical_days }} ]; then
                 echo "CRITICAL: $domain - Expires in $DAYS_REMAINING days on $NOT_AFTER"
-                return 0
+                EXPIRING_COUNT=$((EXPIRING_COUNT + 1))
               elif [ "$DAYS_REMAINING" -le {{ warning_days }} ]; then
                 echo "WARNING: $domain - Expires in $DAYS_REMAINING days on $NOT_AFTER"
-                return 0
-              fi
-
-              return 2  # Not expiring soon
-            }
-
-            # Check all domains
-            EXPIRING_COUNT=0
-            for domain in "${DOMAINS[@]}"; do
-              if check_expiring "$domain"; then
                 EXPIRING_COUNT=$((EXPIRING_COUNT + 1))
               fi
             done
@@ -241,20 +201,6 @@
             docker exec ciris-caddy sh -c 'find /data/caddy/certificates -type f -name "*.crt" 2>/dev/null' || echo "No certificates found"
             echo ""
 
-            echo "--- Certificate Details ---"
-            docker exec ciris-caddy sh -c '
-              for cert in $(find /data/caddy/certificates -type f -name "*.crt" 2>/dev/null); do
-                echo "Certificate: $cert"
-                # Get certificate details
-                if command -v openssl >/dev/null 2>&1; then
-                  openssl x509 -in "$cert" -noout -subject -dates 2>/dev/null | sed "s/^/  /"
-                else
-                  echo "  (openssl not available in container)"
-                fi
-                echo ""
-              done
-            ' 2>/dev/null || echo "Cannot read certificate details"
-
             echo "--- ACME Accounts ---"
             docker exec ciris-caddy sh -c 'ls -lh /data/caddy/acme/ 2>/dev/null' || echo "No ACME accounts found"
             echo ""
@@ -278,26 +224,6 @@
     - name: "RENEW: Force certificate renewal"
       tags: [renew, never]
       block:
-        - name: "RENEW: Confirm operation"
-          ansible.builtin.pause:
-            prompt: |
-
-              ⚠️  WARNING: You are about to force Caddy to reload configuration ⚠️
-
-              This will:
-              1. Reload Caddy configuration (brief interruption to TLS handshakes)
-              2. Trigger certificate renewal for certs needing renewal
-              3. May cause brief connection issues during reload
-
-              This should ONLY be done if:
-              - Certificates are expiring and not auto-renewing
-              - You have confirmed DNS is correctly configured
-              - You have confirmed Caddy can reach ACME servers
-
-              Region: {{ inventory_hostname | upper }}
-
-              Press ENTER to continue or Ctrl+C to abort...
-
         - name: "RENEW: Reload Caddy configuration"
           ansible.builtin.shell: |
             echo "=== {{ inventory_hostname | upper }} - FORCING CERTIFICATE RENEWAL ==="
@@ -343,34 +269,20 @@
 
             # Define domains based on node
             {% if inventory_hostname == 'vultr' %}
-            DOMAINS=(
-              "billing1.{{ primary_domain }}"
-              "proxy1.{{ primary_domain }}"
-              "lens.{{ primary_domain }}"
-            )
+            DOMAINS="billing1.{{ primary_domain }} proxy1.{{ primary_domain }} lens.{{ primary_domain }}"
             {% else %}
-            DOMAINS=(
-              "billing1.{{ secondary_domain }}"
-              "proxy1.{{ secondary_domain }}"
-            )
+            DOMAINS="billing1.{{ secondary_domain }} proxy1.{{ secondary_domain }}"
             {% endif %}
 
-            check_health() {
-              local domain=$1
+            FAILED=0
+            for domain in $DOMAINS; do
               # Quick connection test
               if echo | timeout 3 openssl s_client -servername "$domain" -connect "$domain:443" >/dev/null 2>&1; then
                 echo "✓ $domain - TLS OK"
-                return 0
               else
                 echo "✗ $domain - TLS FAILED"
-                return 1
+                FAILED=$((FAILED + 1))
               fi
-            }
-
-            # Check all domains
-            FAILED=0
-            for domain in "${DOMAINS[@]}"; do
-              check_health "$domain" || FAILED=$((FAILED + 1))
             done
 
             echo ""
