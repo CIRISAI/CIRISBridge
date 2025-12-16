@@ -69,6 +69,7 @@ agents.{{ dns_soa }} {
     }
 }
 
+{% if inventory_hostname == 'vultr' %}
 # CIRISLens - Observability (US node only)
 lens.{{ dns_soa }} {
     # CIRISLens API routes (log ingestion, admin) - specific paths only
@@ -96,6 +97,7 @@ lens.{{ dns_soa }} {
         format json
     }
 }
+{% endif %}
 
 # Root domain - redirect to docs or landing page
 {{ dns_soa }} {
