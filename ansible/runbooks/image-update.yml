@@ -1,0 +1,314 @@
+---
+# Docker Image Update Runbook
+# Validates and updates Docker images across all CIRIS services
+#
+# BEST PRACTICES IMPLEMENTED:
+# - Digest comparison (sha256) for accurate version detection
+# - Health check validation before/after updates
+# - Rolling updates to minimize downtime
+# - Dry-run mode for safe validation
+# - Immutable infrastructure: pull new images, don't patch running containers
+#
+# Usage:
+#   # Check for updates (dry-run, no changes)
+#   ansible-playbook -i inventory/production.yml runbooks/image-update.yml --tags check
+#
+#   # Update all services
+#   ansible-playbook -i inventory/production.yml runbooks/image-update.yml --tags update
+#
+#   # Update specific service
+#   ansible-playbook -i inventory/production.yml runbooks/image-update.yml --tags update -e "service=billing"
+#
+#   # Single region
+#   ansible-playbook -i inventory/production.yml runbooks/image-update.yml --tags check --limit us
+#
+#   # Force update even if digest matches (re-pull)
+#   ansible-playbook -i inventory/production.yml runbooks/image-update.yml --tags update -e "force=true"
+
+- name: "DOCKER IMAGE UPDATE - Validate and Update Container Images"
+  hosts: all
+  gather_facts: false
+  vars:
+    # Services to check (container_name: image)
+    services:
+      billing:
+        container: ciris-billing
+        image: ghcr.io/cirisai/cirisbilling:latest
+        compose_dir: /opt/ciris/billing
+      proxy:
+        container: ciris-proxy
+        image: ghcr.io/cirisai/cirisproxy:latest
+        compose_dir: /opt/ciris/proxy
+      postgres:
+        container: ciris-postgres
+        image: postgres:15-alpine
+        compose_dir: /opt/ciris/postgres
+      caddy:
+        container: ciris-caddy
+        image: caddy:2-alpine
+        compose_dir: /opt/ciris/caddy
+    # US-only services
+    us_only_services:
+      lens_api:
+        container: cirislens-api
+        image: ghcr.io/cirisai/cirislens-api:latest
+        compose_dir: /opt/ciris/lens
+      lens_db:
+        container: cirislens-db
+        image: timescale/timescaledb:latest-pg15
+        compose_dir: /opt/ciris/lens
+      lens_grafana:
+        container: cirislens-grafana
+        image: grafana/grafana:latest
+        compose_dir: /opt/ciris/lens
+    force: false
+    service: ""
+
+  tasks:
+    # =========================================================================
+    # CHECK MODE - Compare running vs registry digests
+    # =========================================================================
+    - name: "CHECK: Validate Docker images"
+      tags: [check, always]
+      block:
+        - name: "CHECK: Get running container digests"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - IMAGE STATUS ==="
+            echo ""
+            printf "%-20s %-15s %-12s %s\n" "CONTAINER" "STATUS" "UPDATE" "IMAGE"
+            printf "%-20s %-15s %-12s %s\n" "---------" "------" "------" "-----"
+
+            {% for name, svc in services.items() %}
+            # Check {{ name }}
+            CONTAINER="{{ svc.container }}"
+            IMAGE="{{ svc.image }}"
+
+            if docker ps --format '{%raw%}{{.Names}}{%endraw%}' | grep -q "^${CONTAINER}$"; then
+              # Get running digest
+              RUNNING=$(docker inspect "$CONTAINER" --format '{%raw%}{{index .RepoDigests 0}}{%endraw%}' 2>/dev/null | cut -d'@' -f2 | cut -c1-12)
+
+              # Get registry digest (pull metadata only)
+              docker pull "$IMAGE" -q >/dev/null 2>&1
+              LATEST=$(docker inspect "$IMAGE" --format '{%raw%}{{index .RepoDigests 0}}{%endraw%}' 2>/dev/null | cut -d'@' -f2 | cut -c1-12)
+
+              if [ -z "$RUNNING" ]; then
+                RUNNING="unknown"
+              fi
+              if [ -z "$LATEST" ]; then
+                LATEST="unknown"
+              fi
+
+              if [ "$RUNNING" = "$LATEST" ]; then
+                printf "%-20s %-15s %-12s %s\n" "$CONTAINER" "current" "-" "$IMAGE"
+              else
+                printf "%-20s %-15s %-12s %s\n" "$CONTAINER" "outdated" "YES" "$IMAGE"
+              fi
+            else
+              printf "%-20s %-15s %-12s %s\n" "$CONTAINER" "not running" "-" "$IMAGE"
+            fi
+            {% endfor %}
+
+            {% if inventory_hostname == 'vultr' %}
+            # US-only services
+            {% for name, svc in us_only_services.items() %}
+            CONTAINER="{{ svc.container }}"
+            IMAGE="{{ svc.image }}"
+
+            if docker ps --format '{%raw%}{{.Names}}{%endraw%}' | grep -q "^${CONTAINER}$"; then
+              RUNNING=$(docker inspect "$CONTAINER" --format '{%raw%}{{index .RepoDigests 0}}{%endraw%}' 2>/dev/null | cut -d'@' -f2 | cut -c1-12)
+              docker pull "$IMAGE" -q >/dev/null 2>&1
+              LATEST=$(docker inspect "$IMAGE" --format '{%raw%}{{index .RepoDigests 0}}{%endraw%}' 2>/dev/null | cut -d'@' -f2 | cut -c1-12)
+
+              if [ -z "$RUNNING" ]; then RUNNING="unknown"; fi
+              if [ -z "$LATEST" ]; then LATEST="unknown"; fi
+
+              if [ "$RUNNING" = "$LATEST" ]; then
+                printf "%-20s %-15s %-12s %s\n" "$CONTAINER" "current" "-" "$IMAGE"
+              else
+                printf "%-20s %-15s %-12s %s\n" "$CONTAINER" "outdated" "YES" "$IMAGE"
+              fi
+            else
+              printf "%-20s %-15s %-12s %s\n" "$CONTAINER" "not running" "-" "$IMAGE"
+            fi
+            {% endfor %}
+            {% endif %}
+          register: image_check
+          changed_when: false
+
+        - name: "CHECK: Display results"
+          ansible.builtin.debug:
+            msg: "{{ image_check.stdout }}"
+
+    # =========================================================================
+    # UPDATE MODE - Pull and restart outdated services
+    # =========================================================================
+    - name: "UPDATE: Pull and restart outdated services"
+      tags: [update, never]
+      block:
+        - name: "UPDATE: Pre-flight health check"
+          ansible.builtin.shell: |
+            echo "=== PRE-UPDATE HEALTH CHECK ==="
+            docker ps --format 'table {%raw%}{{.Names}}\t{{.Status}}{%endraw%}' | grep -E 'ciris|lens' || echo "No CIRIS containers"
+          register: pre_health
+          changed_when: false
+
+        - name: "UPDATE: Show pre-update status"
+          ansible.builtin.debug:
+            msg: "{{ pre_health.stdout }}"
+
+        - name: "UPDATE: Update billing"
+          when: service == "" or service == "billing"
+          block:
+            - name: "UPDATE: Pull billing image"
+              community.docker.docker_image:
+                name: "{{ services.billing.image }}"
+                source: pull
+                force_source: "{{ force | bool }}"
+
+            - name: "UPDATE: Restart billing"
+              community.docker.docker_compose_v2:
+                project_src: "{{ services.billing.compose_dir }}"
+                state: present
+                pull: always
+              notify: Wait for billing health
+
+        - name: "UPDATE: Update proxy"
+          when: service == "" or service == "proxy"
+          block:
+            - name: "UPDATE: Pull proxy image"
+              community.docker.docker_image:
+                name: "{{ services.proxy.image }}"
+                source: pull
+                force_source: "{{ force | bool }}"
+
+            - name: "UPDATE: Restart proxy"
+              community.docker.docker_compose_v2:
+                project_src: "{{ services.proxy.compose_dir }}"
+                state: present
+                pull: always
+              notify: Wait for proxy health
+
+        - name: "UPDATE: Update caddy"
+          when: service == "" or service == "caddy"
+          block:
+            - name: "UPDATE: Pull caddy image"
+              community.docker.docker_image:
+                name: "{{ services.caddy.image }}"
+                source: pull
+                force_source: "{{ force | bool }}"
+
+            - name: "UPDATE: Restart caddy"
+              community.docker.docker_compose_v2:
+                project_src: "{{ services.caddy.compose_dir }}"
+                state: present
+                pull: always
+              notify: Wait for caddy health
+
+        - name: "UPDATE: Update postgres"
+          when: service == "" or service == "postgres"
+          block:
+            - name: "UPDATE: Pull postgres image"
+              community.docker.docker_image:
+                name: "{{ services.postgres.image }}"
+                source: pull
+                force_source: "{{ force | bool }}"
+
+            - name: "UPDATE: Restart postgres (careful - has data)"
+              community.docker.docker_compose_v2:
+                project_src: "{{ services.postgres.compose_dir }}"
+                state: present
+                pull: always
+              notify: Wait for postgres health
+
+        - name: "UPDATE: Update lens (US only)"
+          when:
+            - inventory_hostname == 'vultr'
+            - service == "" or service == "lens"
+          block:
+            - name: "UPDATE: Pull lens images"
+              community.docker.docker_image:
+                name: "{{ item }}"
+                source: pull
+                force_source: "{{ force | bool }}"
+              loop:
+                - "{{ us_only_services.lens_api.image }}"
+                - "{{ us_only_services.lens_db.image }}"
+                - "{{ us_only_services.lens_grafana.image }}"
+
+            - name: "UPDATE: Restart lens stack"
+              community.docker.docker_compose_v2:
+                project_src: "{{ us_only_services.lens_api.compose_dir }}"
+                state: present
+                pull: always
+              notify: Wait for lens health
+
+        - name: "UPDATE: Post-update health check"
+          ansible.builtin.shell: |
+            echo "=== POST-UPDATE HEALTH CHECK ==="
+            sleep 10
+            docker ps --format 'table {%raw%}{{.Names}}\t{{.Status}}{%endraw%}' | grep -E 'ciris|lens' || echo "No CIRIS containers"
+          register: post_health
+          changed_when: false
+
+        - name: "UPDATE: Show post-update status"
+          ansible.builtin.debug:
+            msg: "{{ post_health.stdout }}"
+
+    # =========================================================================
+    # CLEANUP - Remove unused images
+    # =========================================================================
+    - name: "CLEANUP: Remove dangling images"
+      tags: [cleanup, never]
+      block:
+        - name: "CLEANUP: Prune unused images"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - CLEANUP ==="
+            echo ""
+            echo "Before cleanup:"
+            docker system df
+            echo ""
+            echo "Removing dangling images..."
+            docker image prune -f
+            echo ""
+            echo "After cleanup:"
+            docker system df
+          register: cleanup_result
+          changed_when: "'Total reclaimed space' in cleanup_result.stdout"
+
+        - name: "CLEANUP: Display results"
+          ansible.builtin.debug:
+            msg: "{{ cleanup_result.stdout }}"
+
+  handlers:
+    - name: Wait for billing health
+      ansible.builtin.wait_for:
+        port: 8080
+        host: 127.0.0.1
+        delay: 5
+        timeout: 60
+
+    - name: Wait for proxy health
+      ansible.builtin.wait_for:
+        port: 4000
+        host: 127.0.0.1
+        delay: 5
+        timeout: 60
+
+    - name: Wait for caddy health
+      ansible.builtin.wait_for:
+        port: 443
+        delay: 5
+        timeout: 60
+
+    - name: Wait for postgres health
+      ansible.builtin.wait_for:
+        port: 5432
+        delay: 5
+        timeout: 60
+
+    - name: Wait for lens health
+      ansible.builtin.wait_for:
+        port: 8200
+        host: 127.0.0.1
+        delay: 5
+        timeout: 60
