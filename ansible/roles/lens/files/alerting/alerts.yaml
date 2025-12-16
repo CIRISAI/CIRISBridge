@@ -28,7 +28,9 @@ groups:
                 WHERE level IN ('ERROR', 'CRITICAL')
                   AND timestamp > NOW() - INTERVAL '5 minutes'
                   AND message NOT LIKE '%play_integrity%'
+                  AND message NOT LIKE '%playintegrity%'
                   AND message NOT LIKE '%RateLimitError%'
+                  AND COALESCE(event, '') NOT LIKE '%play_integrity%'
               format: table
           - refId: B
             relativeTimeRange:
@@ -110,7 +112,9 @@ groups:
                 WHERE level IN ('ERROR', 'CRITICAL')
                   AND timestamp > NOW() - INTERVAL '5 minutes'
                   AND message NOT LIKE '%play_integrity%'
+                  AND message NOT LIKE '%playintegrity%'
                   AND message NOT LIKE '%RateLimitError%'
+                  AND COALESCE(event, '') NOT LIKE '%play_integrity%'
               format: table
           - refId: B
             relativeTimeRange:
@@ -171,7 +175,9 @@ groups:
                   AND level IN ('ERROR', 'CRITICAL')
                   AND timestamp > NOW() - INTERVAL '5 minutes'
                   AND message NOT LIKE '%play_integrity%'
+                  AND message NOT LIKE '%playintegrity%'
                   AND message NOT LIKE '%RateLimitError%'
+                  AND COALESCE(event, '') NOT LIKE '%play_integrity%'
               format: table
           - refId: B
             relativeTimeRange:
