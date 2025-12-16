@@ -118,6 +118,7 @@ ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing
 ansible-playbook -i inventory/production.yml playbooks/site.yml --tags proxy
 ansible-playbook -i inventory/production.yml playbooks/site.yml --tags dns
 ansible-playbook -i inventory/production.yml playbooks/site.yml --tags lens
+ansible-playbook -i inventory/production.yml playbooks/site.yml --tags scheduler
 
 # Deploy to single node
 ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing --limit us
@@ -126,7 +127,33 @@ ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing -
 # Ad-hoc commands
 ansible vultr -i inventory/production.yml -m shell -a 'docker ps'
 ansible all -i inventory/production.yml -m shell -a 'docker logs ciris-billing --tail 20'
+
+# Check scheduler timers
+ansible all -i inventory/production.yml -m shell -a 'systemctl list-timers | grep ciris'
 ```
+
+## Scheduler (Automated Health Monitoring)
+
+Both nodes run systemd timers that post health data to CIRISLens:
+
+| Timer | Schedule | Purpose |
+|-------|----------|---------|
+| `ciris-heartbeat.timer` | Every 5 min | Node liveness heartbeat |
+| `ciris-daily-checks.timer` | 06:00 UTC daily | Cert status, replication, disk |
+| `ciris-weekly-security.timer` | Sun 04:00 UTC | Security posture scan |
+| `ciris-weekly-cleanup.timer` | Sat 03:00 UTC | Docker/log cleanup |
+
+**Grafana Alerts:**
+- `heartbeat-missing-us-alert` / `heartbeat-missing-eu-alert`: Fires if <2 heartbeats in 10 min
+- Alerts use `noDataState: Alerting` - if CIRISLens can't query, it alerts
+
+**Adding scheduler token for new deployments:**
+```sql
+-- Generate token, then add to cirislens.service_tokens:
+INSERT INTO cirislens.service_tokens (service_name, token_hash, description)
+VALUES ('ciris-scheduler', encode(sha256('YOUR_TOKEN'::bytea), 'hex'), 'Scheduler heartbeat');
+```
+Then add `scheduler_service_token: "YOUR_TOKEN"` to `inventory/production.yml`.
 
 ## SRE Runbooks
 
@@ -134,18 +161,41 @@ Operational runbooks for incident response and infrastructure management are in 
 
 ### Available Runbooks
 
+**Incident Response:**
 | Runbook | Purpose |
 |---------|---------|
 | `incident-response.yml` | General incident management with diagnose, fix, escalate, close phases |
 | `intrusion-response.yml` | Security incident handling with IP blocking and forensics collection |
 | `provider-outage.yml` | Cloud provider failover/failback with DNS update guidance |
+
+**Region Management:**
+| Runbook | Purpose |
+|---------|---------|
 | `add-region.yml` | New region provisioning checklist |
 | `remove-region.yml` | Region decommissioning with data archival |
+
+**Operational (run via scheduler or manually):**
+| Runbook | Purpose |
+|---------|---------|
+| `backup-verify.yml` | PostgreSQL backup and replication health |
+| `cert-status.yml` | TLS certificate expiration check |
+| `disk-cleanup.yml` | Docker/log cleanup with emergency mode |
+| `security-scan.yml` | SSH hardening, firewall, updates check |
+| `traffic-monitor.yml` | Network traffic analysis |
+| `log-audit.yml` | Service log analysis |
+| `image-update.yml` | Container image updates |
 
 ### Common Runbook Commands
 
 ```bash
 # From ansible/ directory
+
+# Operational Health Checks
+ansible-playbook -i inventory/production.yml runbooks/cert-status.yml
+ansible-playbook -i inventory/production.yml runbooks/backup-verify.yml
+ansible-playbook -i inventory/production.yml runbooks/security-scan.yml
+ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags status
+ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags cleanup  # Actually clean
 
 # General Incident Response
 ansible-playbook -i inventory/production.yml runbooks/incident-response.yml -e "severity=P1"
@@ -219,6 +269,24 @@ When provisioning Grafana datasources, the `uid` in the provisioning file must m
 - All sensitive values via variables (never hardcoded)
 - Tag all resources with `cirisbridge` label
 
+## SPOF Analysis
+
+**Redundant (no SPOF):**
+- Compute: Active/Active on both nodes
+- DNS: Dual Constellation nameservers (ns1/ns2)
+- Billing/Proxy: Both nodes serve traffic via GeoDNS
+
+**Single Points of Failure:**
+| Component | Impact | Mitigation |
+|-----------|--------|------------|
+| CIRISLens | Observability blind | US-only; consider EU replica |
+| PostgreSQL WAL | No disaster recovery | Add S3 WAL archival |
+| Cloudflare DNS | Domain unresolvable | External dependency |
+| GHCR | Deployments blocked | Pre-pull images locally |
+| Let's Encrypt | Cert renewal fails | Monitor expiry, backup certs |
+
+**Scheduler provides monitoring for:** cert expiry, replication health, disk space, node liveness.
+
 ## Gotchas
 
 1. **Terraform state**: Don't lose `terraform.tfstate` - contains current infra mapping
@@ -227,6 +295,10 @@ When provisioning Grafana datasources, the `uid` in the provisioning file must m
 4. **DNS propagation**: Changes can take up to 24 hours globally
 5. **TLS certs**: Caddy auto-renews, but first deploy needs ports 80/443 open
 6. **Container restarts**: `docker compose restart` doesn't reload env vars
+7. **SSH config ordering**: OpenSSH uses first-match-wins; use `00-` prefix to override cloud-init
+8. **CIRISLens API URL**: Must include `/lens-api` prefix (Caddy strips it before proxying)
+9. **Grafana alerts**: Require Grafana restart after provisioning file changes
+10. **Shell compatibility**: Runbook scripts must use POSIX sh, not bash arrays
 
 ## Mission Alignment
 
