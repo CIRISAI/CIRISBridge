@@ -91,11 +91,11 @@ model_list:
       api_key: "os.environ/OPENAI_API_KEY"
 
   # Aliases for simpler client usage
-  # Default model for CIRIS Agent - Llama 4 Maverick via OpenRouter (cheapest)
+  # Default model for CIRIS Agent - Llama 4 Maverick via Together (most reliable)
   - model_name: "default"
     litellm_params:
-      model: "openrouter/meta-llama/llama-4-maverick"
-      api_key: "os.environ/OPENROUTER_API_KEY"
+      model: "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+      api_key: "os.environ/TOGETHER_API_KEY"
 
   - model_name: "fast"
     litellm_params:
@@ -132,13 +132,13 @@ router_settings:
   retry_after: 1
 
   # Fallback chain - Llama 4 Maverick across 3 providers
-  # Only fallback to other Llama 4 Maverick providers - never degrade to older models
+  # OpenRouter last due to timeout issues; Together primary, Groq secondary
   fallbacks:
-    - "default": ["groq/llama-4-maverick", "together/llama-4-maverick"]
-    - "llama-4-maverick": ["groq/llama-4-maverick", "together/llama-4-maverick"]
+    - "default": ["groq/llama-4-maverick", "openrouter/llama-4-maverick"]
+    - "llama-4-maverick": ["groq/llama-4-maverick", "openrouter/llama-4-maverick"]
     - "together/llama-4-maverick": ["groq/llama-4-maverick", "openrouter/llama-4-maverick"]
-    - "groq/llama-4-maverick": ["openrouter/llama-4-maverick", "together/llama-4-maverick"]
-    - "openrouter/llama-4-maverick": ["groq/llama-4-maverick", "together/llama-4-maverick"]
+    - "groq/llama-4-maverick": ["together/llama-4-maverick", "openrouter/llama-4-maverick"]
+    - "openrouter/llama-4-maverick": ["together/llama-4-maverick", "groq/llama-4-maverick"]
     - "groq/llama-3.3-70b": ["together/llama-3.1-70b", "openai/gpt-4o-mini"]
 
 general_settings:
