@@ -1,0 +1,374 @@
+---
+# Disk Cleanup Runbook
+# Manages disk space across CIRIS infrastructure nodes
+#
+# BEST PRACTICES IMPLEMENTED:
+# - Safe Docker pruning (preserves volumes - data is sacrosanct)
+# - Before/after disk usage reporting
+# - Granular cleanup modes (status, docker, logs, full)
+# - Container log rotation (prevents unbounded growth)
+# - Never destructive without explicit confirmation
+#
+# DOCKER CLEANUP STRATEGY:
+# - Prune dangling images (untagged, unreferenced)
+# - Remove stopped containers (preserve running)
+# - Clean build cache (filter: >72h old)
+# - Remove unused networks (preserve active)
+# - NEVER prune volumes (contains persistent data - Postgres, Redis, etc.)
+#
+# LOG ROTATION STRATEGY:
+# - Truncate container logs >100MB (keeps last 1000 lines)
+# - System journal cleanup (vacuum, >7d old)
+# - Preserve recent logs for debugging
+#
+# Usage:
+#   # Check disk usage (safe, read-only)
+#   ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags status
+#
+#   # Clean Docker (removes unused images/containers/networks)
+#   ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags docker-clean
+#
+#   # Clean logs (truncate large container logs, rotate system logs)
+#   ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags logs-clean
+#
+#   # Full cleanup (all operations - requires explicit tag)
+#   ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags full-clean
+#
+#   # Single region
+#   ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags status --limit us
+#
+#   # Emergency space recovery (aggressive - use only in crisis)
+#   ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags emergency
+#
+# References:
+# - Docker pruning: https://docs.docker.com/engine/manage-resources/pruning/
+# - Log rotation: https://docs.docker.com/config/containers/logging/configure/
+
+- name: "DISK CLEANUP - Disk Space Management"
+  hosts: all
+  gather_facts: true
+  vars:
+    # Log size threshold (bytes) - truncate logs larger than this
+    log_size_threshold: 104857600  # 100MB
+    # Lines to keep when truncating logs
+    log_lines_to_keep: 1000
+    # Build cache age filter (hours)
+    build_cache_age: 72
+    # Journal retention (days)
+    journal_retention_days: 7
+
+  tasks:
+    # =========================================================================
+    # STATUS MODE - Show current disk usage (safe, always runs)
+    # =========================================================================
+    - name: "STATUS: Disk usage overview"
+      tags: [status, always]
+      block:
+        - name: "STATUS: Overall disk usage"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - DISK STATUS ==="
+            echo ""
+            echo "=== Filesystem Usage ==="
+            df -h / /var/lib/docker 2>/dev/null || df -h /
+            echo ""
+            echo "=== Docker Disk Usage ==="
+            docker system df -v
+            echo ""
+            echo "=== Top 10 Largest Directories in /var/lib/docker ==="
+            du -h /var/lib/docker/* 2>/dev/null | sort -rh | head -10
+            echo ""
+            echo "=== Container Log Sizes ==="
+            find /var/lib/docker/containers -name "*-json.log" -exec ls -lh {} \; 2>/dev/null | awk '{if($5~/M|G/) print $5, $9}' | sort -rh | head -10 || echo "No large container logs found"
+            echo ""
+            echo "=== System Journal Size ==="
+            journalctl --disk-usage 2>/dev/null || echo "journalctl not available"
+          register: disk_status
+          changed_when: false
+
+        - name: "STATUS: Display results"
+          ansible.builtin.debug:
+            msg: "{{ disk_status.stdout_lines }}"
+
+    # =========================================================================
+    # DOCKER CLEAN MODE - Prune unused Docker resources
+    # =========================================================================
+    - name: "DOCKER-CLEAN: Remove unused Docker resources"
+      tags: [docker-clean, never]
+      block:
+        - name: "DOCKER-CLEAN: Before cleanup snapshot"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - BEFORE DOCKER CLEANUP ==="
+            docker system df
+          register: docker_before
+          changed_when: false
+
+        - name: "DOCKER-CLEAN: Display before status"
+          ansible.builtin.debug:
+            msg: "{{ docker_before.stdout_lines }}"
+
+        - name: "DOCKER-CLEAN: Remove stopped containers"
+          ansible.builtin.shell: |
+            echo "Removing stopped containers..."
+            docker container prune -f
+          register: container_prune
+          changed_when: "'Total reclaimed space' in container_prune.stdout"
+
+        - name: "DOCKER-CLEAN: Remove dangling images"
+          ansible.builtin.shell: |
+            echo "Removing dangling images (untagged, unreferenced)..."
+            docker image prune -f
+          register: image_prune
+          changed_when: "'Total reclaimed space' in image_prune.stdout"
+
+        - name: "DOCKER-CLEAN: Remove unused networks"
+          ansible.builtin.shell: |
+            echo "Removing unused networks..."
+            docker network prune -f
+          register: network_prune
+          changed_when: "'Total reclaimed space' in network_prune.stdout or network_prune.stdout is search('Deleted Networks:')"
+
+        - name: "DOCKER-CLEAN: Remove old build cache (>{{ build_cache_age }}h)"
+          ansible.builtin.shell: |
+            echo "Removing build cache older than {{ build_cache_age }} hours..."
+            docker builder prune -f --filter until={{ build_cache_age }}h
+          register: builder_prune
+          changed_when: "'Total reclaimed space' in builder_prune.stdout"
+
+        - name: "DOCKER-CLEAN: After cleanup snapshot"
+          ansible.builtin.shell: |
+            echo ""
+            echo "=== {{ inventory_hostname | upper }} - AFTER DOCKER CLEANUP ==="
+            docker system df
+          register: docker_after
+          changed_when: false
+
+        - name: "DOCKER-CLEAN: Display after status"
+          ansible.builtin.debug:
+            msg: "{{ docker_after.stdout_lines }}"
+
+        - name: "DOCKER-CLEAN: Summary"
+          ansible.builtin.debug:
+            msg:
+              - "Container prune: {{ container_prune.stdout }}"
+              - "Image prune: {{ image_prune.stdout }}"
+              - "Network prune: {{ network_prune.stdout }}"
+              - "Builder prune: {{ builder_prune.stdout }}"
+
+    # =========================================================================
+    # LOGS CLEAN MODE - Truncate large container logs, rotate system logs
+    # =========================================================================
+    - name: "LOGS-CLEAN: Clean container and system logs"
+      tags: [logs-clean, never]
+      block:
+        - name: "LOGS-CLEAN: Find large container logs"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - FINDING LARGE LOGS ==="
+            find /var/lib/docker/containers -name "*-json.log" -size +{{ log_size_threshold }}c -exec ls -lh {} \; 2>/dev/null | awk '{print $5, $9}' || echo "No logs exceeding threshold"
+          register: large_logs
+          changed_when: false
+
+        - name: "LOGS-CLEAN: Display large logs"
+          ansible.builtin.debug:
+            msg: "{{ large_logs.stdout_lines }}"
+
+        - name: "LOGS-CLEAN: Truncate large container logs (keep last {{ log_lines_to_keep }} lines)"
+          ansible.builtin.shell: |
+            echo "Truncating large container logs..."
+            TRUNCATED=0
+            for log in $(find /var/lib/docker/containers -name "*-json.log" -size +{{ log_size_threshold }}c 2>/dev/null); do
+              echo "Truncating: $log"
+              # Keep last {{ log_lines_to_keep }} lines
+              tail -n {{ log_lines_to_keep }} "$log" > "$log.tmp"
+              mv "$log.tmp" "$log"
+              TRUNCATED=$((TRUNCATED + 1))
+            done
+            echo "Truncated $TRUNCATED log files"
+          register: log_truncate
+          changed_when: log_truncate.stdout is search('Truncated [1-9]')
+
+        - name: "LOGS-CLEAN: Rotate system journal (keep {{ journal_retention_days }} days)"
+          ansible.builtin.shell: |
+            echo "Rotating system journal..."
+            journalctl --vacuum-time={{ journal_retention_days }}d 2>/dev/null || echo "journalctl not available or no action needed"
+          register: journal_rotate
+          changed_when: journal_rotate.stdout is search('Vacuuming done')
+
+        - name: "LOGS-CLEAN: After cleanup status"
+          ansible.builtin.shell: |
+            echo ""
+            echo "=== {{ inventory_hostname | upper }} - AFTER LOG CLEANUP ==="
+            echo "=== Remaining Large Logs ==="
+            find /var/lib/docker/containers -name "*-json.log" -size +{{ log_size_threshold }}c -exec ls -lh {} \; 2>/dev/null | awk '{print $5, $9}' || echo "No large logs remaining"
+            echo ""
+            echo "=== Journal Size ==="
+            journalctl --disk-usage 2>/dev/null || echo "journalctl not available"
+          register: logs_after
+          changed_when: false
+
+        - name: "LOGS-CLEAN: Display after status"
+          ansible.builtin.debug:
+            msg: "{{ logs_after.stdout_lines }}"
+
+    # =========================================================================
+    # FULL CLEAN MODE - All cleanup operations
+    # =========================================================================
+    - name: "FULL-CLEAN: Complete disk cleanup"
+      tags: [full-clean, never]
+      block:
+        - name: "FULL-CLEAN: Initial status"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - FULL CLEANUP STARTING ==="
+            echo ""
+            df -h / /var/lib/docker 2>/dev/null || df -h /
+            echo ""
+            docker system df
+          register: full_before
+          changed_when: false
+
+        - name: "FULL-CLEAN: Display initial status"
+          ansible.builtin.debug:
+            msg: "{{ full_before.stdout_lines }}"
+
+        - name: "FULL-CLEAN: Execute Docker cleanup"
+          ansible.builtin.shell: |
+            echo "=== DOCKER CLEANUP ==="
+            echo "Stopping unused containers..."
+            docker container prune -f
+            echo ""
+            echo "Removing dangling images..."
+            docker image prune -f
+            echo ""
+            echo "Removing unused networks..."
+            docker network prune -f
+            echo ""
+            echo "Removing old build cache..."
+            docker builder prune -f --filter until={{ build_cache_age }}h
+          register: full_docker
+          changed_when: true
+
+        - name: "FULL-CLEAN: Execute log cleanup"
+          ansible.builtin.shell: |
+            echo ""
+            echo "=== LOG CLEANUP ==="
+            echo "Truncating large container logs..."
+            TRUNCATED=0
+            for log in $(find /var/lib/docker/containers -name "*-json.log" -size +{{ log_size_threshold }}c 2>/dev/null); do
+              tail -n {{ log_lines_to_keep }} "$log" > "$log.tmp"
+              mv "$log.tmp" "$log"
+              TRUNCATED=$((TRUNCATED + 1))
+            done
+            echo "Truncated $TRUNCATED container logs"
+            echo ""
+            echo "Rotating system journal..."
+            journalctl --vacuum-time={{ journal_retention_days }}d 2>/dev/null || echo "journalctl not available"
+          register: full_logs
+          changed_when: true
+
+        - name: "FULL-CLEAN: Final status"
+          ansible.builtin.shell: |
+            echo ""
+            echo "=== {{ inventory_hostname | upper }} - FULL CLEANUP COMPLETE ==="
+            echo ""
+            echo "=== Filesystem Usage ==="
+            df -h / /var/lib/docker 2>/dev/null || df -h /
+            echo ""
+            echo "=== Docker Disk Usage ==="
+            docker system df
+          register: full_after
+          changed_when: false
+
+        - name: "FULL-CLEAN: Display final status"
+          ansible.builtin.debug:
+            msg: "{{ full_after.stdout_lines }}"
+
+        - name: "FULL-CLEAN: Summary"
+          ansible.builtin.debug:
+            msg:
+              - "Docker cleanup: {{ full_docker.stdout_lines }}"
+              - "Log cleanup: {{ full_logs.stdout_lines }}"
+
+    # =========================================================================
+    # EMERGENCY MODE - Aggressive cleanup for critical disk space
+    # =========================================================================
+    - name: "EMERGENCY: Aggressive disk space recovery"
+      tags: [emergency, never]
+      block:
+        - name: "EMERGENCY: Warning"
+          ansible.builtin.debug:
+            msg:
+              - "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+              - "  EMERGENCY MODE - AGGRESSIVE CLEANUP"
+              - "  This will remove ALL unused Docker resources"
+              - "  Use only when disk is critically full"
+              - "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+
+        - name: "EMERGENCY: Before status"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - EMERGENCY CLEANUP ==="
+            df -h / /var/lib/docker 2>/dev/null || df -h /
+            echo ""
+            docker system df
+          register: emergency_before
+          changed_when: false
+
+        - name: "EMERGENCY: Display before status"
+          ansible.builtin.debug:
+            msg: "{{ emergency_before.stdout_lines }}"
+
+        - name: "EMERGENCY: System prune (all unused resources)"
+          ansible.builtin.shell: |
+            echo "Removing ALL unused Docker resources (preserving volumes)..."
+            # --all removes ALL unused images, not just dangling
+            docker system prune -a -f
+          register: emergency_prune
+          changed_when: true
+
+        - name: "EMERGENCY: Aggressive build cache cleanup"
+          ansible.builtin.shell: |
+            echo "Removing ALL build cache..."
+            docker builder prune -a -f
+          register: emergency_builder
+          changed_when: true
+
+        - name: "EMERGENCY: Truncate all container logs"
+          ansible.builtin.shell: |
+            echo "Truncating ALL container logs..."
+            TRUNCATED=0
+            for log in $(find /var/lib/docker/containers -name "*-json.log" 2>/dev/null); do
+              # Keep only last 100 lines in emergency mode
+              tail -n 100 "$log" > "$log.tmp"
+              mv "$log.tmp" "$log"
+              TRUNCATED=$((TRUNCATED + 1))
+            done
+            echo "Truncated $TRUNCATED logs"
+          register: emergency_logs
+          changed_when: true
+
+        - name: "EMERGENCY: Vacuum journal (keep 3 days)"
+          ansible.builtin.shell: |
+            echo "Vacuuming journal (keep 3 days)..."
+            journalctl --vacuum-time=3d 2>/dev/null || echo "journalctl not available"
+          register: emergency_journal
+          changed_when: true
+
+        - name: "EMERGENCY: After status"
+          ansible.builtin.shell: |
+            echo ""
+            echo "=== {{ inventory_hostname | upper }} - EMERGENCY CLEANUP COMPLETE ==="
+            df -h / /var/lib/docker 2>/dev/null || df -h /
+            echo ""
+            docker system df
+          register: emergency_after
+          changed_when: false
+
+        - name: "EMERGENCY: Display after status"
+          ansible.builtin.debug:
+            msg: "{{ emergency_after.stdout_lines }}"
+
+        - name: "EMERGENCY: Reclaimed space summary"
+          ansible.builtin.debug:
+            msg:
+              - "System prune: {{ emergency_prune.stdout }}"
+              - "Builder prune: {{ emergency_builder.stdout }}"
+              - "Logs truncated: {{ emergency_logs.stdout }}"
+              - "Journal vacuum: {{ emergency_journal.stdout }}"
