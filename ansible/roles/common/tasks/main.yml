@@ -124,6 +124,27 @@
     mode: "0644"
   notify: Restart fail2ban
 
+# SSH Hardening - disable password auth, key-only access
+# Uses 00- prefix to load before cloud-init configs (first match wins in sshd)
+- name: Harden SSH configuration
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/00-ciris-hardening.conf
+    content: |
+      # CIRISBridge SSH Hardening
+      # Managed by Ansible - do not edit manually
+
+      # Disable password authentication (key-only)
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+
+      # Enable public key authentication
+      PubkeyAuthentication yes
+
+      # Note: PermitRootLogin left as provider default
+      # Root access is protected by key-only auth + fail2ban
+    mode: "0644"
+  notify: Reload sshd
+
 - name: Configure sysctl for performance
   ansible.posix.sysctl:
     name: "{{ item.name }}"
