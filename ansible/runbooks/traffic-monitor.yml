@@ -1,0 +1,362 @@
+---
+# Traffic Monitor Runbook
+# Real-time traffic analysis and DDoS detection
+#
+# Usage:
+#   # Quick traffic snapshot
+#   ansible-playbook -i inventory/production.yml runbooks/traffic-monitor.yml --tags snapshot
+#
+#   # Full analysis with baselines
+#   ansible-playbook -i inventory/production.yml runbooks/traffic-monitor.yml --tags analyze
+#
+#   # Check for anomalies only
+#   ansible-playbook -i inventory/production.yml runbooks/traffic-monitor.yml --tags anomaly
+#
+#   # Connection analysis (potential slowloris)
+#   ansible-playbook -i inventory/production.yml runbooks/traffic-monitor.yml --tags connections
+#
+#   # Geographic distribution
+#   ansible-playbook -i inventory/production.yml runbooks/traffic-monitor.yml --tags geo
+#
+#   # Single region
+#   ansible-playbook -i inventory/production.yml runbooks/traffic-monitor.yml --limit us
+
+- name: "TRAFFIC MONITOR - DDoS Detection and Traffic Analysis"
+  hosts: all
+  gather_facts: false
+  vars:
+    # Thresholds (adjust based on baseline)
+    rps_warning: 100        # Requests per second warning
+    rps_critical: 500       # Requests per second critical
+    conn_warning: 500       # Active connections warning
+    conn_critical: 1000     # Active connections critical
+    error_rate_warning: 5   # 5xx error rate % warning
+    error_rate_critical: 10 # 5xx error rate % critical
+    sample_seconds: 60      # Sample window for RPS calculation
+
+  tasks:
+    # =========================================================================
+    # SNAPSHOT - Quick traffic overview
+    # =========================================================================
+    - name: "SNAPSHOT: Quick traffic overview"
+      tags: [snapshot, always]
+      block:
+        - name: "SNAPSHOT: Gather metrics"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - TRAFFIC SNAPSHOT ==="
+            echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+
+            # Active connections
+            echo "--- CONNECTIONS ---"
+            ESTABLISHED=$(ss -tan state established | wc -l)
+            TIME_WAIT=$(ss -tan state time-wait | wc -l)
+            CLOSE_WAIT=$(ss -tan state close-wait | wc -l)
+            SYN_RECV=$(ss -tan state syn-recv | wc -l)
+            echo "Established: $ESTABLISHED"
+            echo "Time-Wait: $TIME_WAIT"
+            echo "Close-Wait: $CLOSE_WAIT"
+            echo "SYN-Recv: $SYN_RECV (potential SYN flood if high)"
+            echo ""
+
+            # Connections by port
+            echo "--- CONNECTIONS BY PORT ---"
+            ss -tan | awk '{print $4}' | grep -oE ':[0-9]+$' | sort | uniq -c | sort -rn | head -10
+            echo ""
+
+            # Docker container network stats
+            echo "--- CONTAINER NETWORK ---"
+            docker stats --no-stream --format "table {% raw %}{{.Name}}\t{{.NetIO}}{% endraw %}" | grep -E 'ciris|lens' || echo "No CIRIS containers"
+            echo ""
+
+            # Recent request rate from Caddy (if logging enabled)
+            if docker logs ciris-caddy --since 1m 2>&1 | grep -q "HTTP"; then
+              echo "--- CADDY REQUESTS (last 60s) ---"
+              TOTAL=$(docker logs ciris-caddy --since 1m 2>&1 | grep -c "HTTP" || echo 0)
+              echo "Total requests: $TOTAL"
+              echo "Requests/sec: $(echo "scale=2; $TOTAL / 60" | bc)"
+            fi
+          register: snapshot
+          changed_when: false
+
+        - name: "SNAPSHOT: Display"
+          ansible.builtin.debug:
+            msg: "{{ snapshot.stdout }}"
+
+    # =========================================================================
+    # ANALYZE - Full traffic analysis with baselines
+    # =========================================================================
+    - name: "ANALYZE: Full traffic analysis"
+      tags: [analyze, never]
+      block:
+        - name: "ANALYZE: Comprehensive metrics"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - TRAFFIC ANALYSIS ==="
+            echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+
+            # System load
+            echo "--- SYSTEM LOAD ---"
+            uptime
+            echo ""
+
+            # Network interface stats
+            echo "--- NETWORK INTERFACES ---"
+            cat /proc/net/dev | grep -E 'eth0|ens' | awk '{print "RX bytes:", $2, "TX bytes:", $10}'
+            echo ""
+
+            # Connection states summary
+            echo "--- CONNECTION STATES ---"
+            ss -tan | awk 'NR>1 {print $1}' | sort | uniq -c | sort -rn
+            echo ""
+
+            # Top IPs by connection count
+            echo "--- TOP SOURCE IPs (by connections) ---"
+            ss -tan | awk 'NR>1 {print $5}' | cut -d: -f1 | sort | uniq -c | sort -rn | head -10
+            echo ""
+
+            # Bandwidth per container
+            echo "--- CONTAINER BANDWIDTH ---"
+            docker stats --no-stream --format "table {% raw %}{{.Name}}\t{{.NetIO}}\t{{.CPUPerc}}\t{{.MemUsage}}{% endraw %}" | grep -E 'NAME|ciris|lens'
+            echo ""
+
+            # Caddy access patterns (if available)
+            echo "--- ENDPOINT DISTRIBUTION (last 5 min) ---"
+            docker logs ciris-caddy --since 5m 2>&1 | grep -oE '"(GET|POST|PUT|DELETE) [^"]+' | sed 's/"//g' | awk '{print $1, $2}' | sort | uniq -c | sort -rn | head -15 || echo "No Caddy logs"
+            echo ""
+
+            # Response codes
+            echo "--- RESPONSE CODES (last 5 min) ---"
+            docker logs ciris-caddy --since 5m 2>&1 | grep -oE '" [0-9]{3} ' | awk '{print $2}' | sort | uniq -c | sort -rn || echo "No response codes"
+            echo ""
+
+            # Request timing (if available)
+            echo "--- SLOW REQUESTS (>1s, last 5 min) ---"
+            docker logs ciris-caddy --since 5m 2>&1 | grep -E '"duration":[1-9][0-9]{3,}' | tail -5 || echo "No slow requests"
+          register: analysis
+          changed_when: false
+
+        - name: "ANALYZE: Display"
+          ansible.builtin.debug:
+            msg: "{{ analysis.stdout }}"
+
+    # =========================================================================
+    # ANOMALY - Check for traffic anomalies
+    # =========================================================================
+    - name: "ANOMALY: Check for traffic anomalies"
+      tags: [anomaly, never]
+      block:
+        - name: "ANOMALY: Detect issues"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - ANOMALY DETECTION ==="
+            echo ""
+            ALERTS=""
+
+            # Check connection count
+            CONN=$(ss -tan state established | wc -l)
+            if [ "$CONN" -gt {{ conn_critical }} ]; then
+              ALERTS="${ALERTS}CRITICAL: $CONN established connections (threshold: {{ conn_critical }})\n"
+            elif [ "$CONN" -gt {{ conn_warning }} ]; then
+              ALERTS="${ALERTS}WARNING: $CONN established connections (threshold: {{ conn_warning }})\n"
+            fi
+
+            # Check SYN-RECV (potential SYN flood)
+            SYN=$(ss -tan state syn-recv | wc -l)
+            if [ "$SYN" -gt 100 ]; then
+              ALERTS="${ALERTS}CRITICAL: $SYN SYN-RECV connections (potential SYN flood)\n"
+            elif [ "$SYN" -gt 50 ]; then
+              ALERTS="${ALERTS}WARNING: $SYN SYN-RECV connections (elevated)\n"
+            fi
+
+            # Check CLOSE-WAIT (potential resource leak)
+            CLOSE=$(ss -tan state close-wait | wc -l)
+            if [ "$CLOSE" -gt 100 ]; then
+              ALERTS="${ALERTS}WARNING: $CLOSE CLOSE-WAIT connections (potential leak)\n"
+            fi
+
+            # Check for single IP with many connections
+            TOP_IP_INFO=$(ss -tan | awk 'NR>1 {print $5}' | cut -d: -f1 | sort | uniq -c | sort -rn | head -1)
+            TOP_IP_COUNT=$(echo "$TOP_IP_INFO" | awk '{print $1}' | tr -d '\n')
+            TOP_IP=$(echo "$TOP_IP_INFO" | awk '{print $2}' | tr -d '\n')
+            TOP_IP_COUNT=${TOP_IP_COUNT:-0}
+            if [ "$TOP_IP_COUNT" -gt 100 ] 2>/dev/null; then
+              ALERTS="${ALERTS}WARNING: Single IP $TOP_IP has $TOP_IP_COUNT connections\n"
+            fi
+
+            # Check 5xx error rate
+            TOTAL_REQ=$(docker logs ciris-caddy --since 5m 2>&1 | grep -c "HTTP" || true)
+            TOTAL_REQ=${TOTAL_REQ:-1}
+            ERROR_5XX=$(docker logs ciris-caddy --since 5m 2>&1 | grep -cE '" 5[0-9]{2} ' || true)
+            ERROR_5XX=${ERROR_5XX:-0}
+            if [ "$TOTAL_REQ" -gt 0 ] 2>/dev/null; then
+              ERROR_RATE=$((ERROR_5XX * 100 / TOTAL_REQ))
+              if [ "$ERROR_RATE" -gt {{ error_rate_critical }} ] 2>/dev/null; then
+                ALERTS="${ALERTS}CRITICAL: ${ERROR_RATE}% error rate (${ERROR_5XX}/${TOTAL_REQ} requests)\n"
+              elif [ "$ERROR_RATE" -gt {{ error_rate_warning }} ] 2>/dev/null; then
+                ALERTS="${ALERTS}WARNING: ${ERROR_RATE}% error rate (${ERROR_5XX}/${TOTAL_REQ} requests)\n"
+              fi
+            fi
+
+            # Check request rate
+            REQ_1M=$(docker logs ciris-caddy --since 1m 2>&1 | grep -c "HTTP" || true)
+            REQ_1M=${REQ_1M:-0}
+            RPS=$((REQ_1M / 60))
+            if [ "$RPS" -gt {{ rps_critical }} ]; then
+              ALERTS="${ALERTS}CRITICAL: ${RPS} requests/sec (threshold: {{ rps_critical }})\n"
+            elif [ "$RPS" -gt {{ rps_warning }} ]; then
+              ALERTS="${ALERTS}WARNING: ${RPS} requests/sec (threshold: {{ rps_warning }})\n"
+            fi
+
+            # Output results
+            if [ -n "$ALERTS" ]; then
+              echo "ANOMALIES DETECTED:"
+              echo ""
+              echo -e "$ALERTS"
+            else
+              echo "✓ No anomalies detected"
+              echo ""
+              echo "Current metrics:"
+              echo "  Connections: $CONN"
+              echo "  SYN-RECV: $SYN"
+              echo "  Request rate: ${RPS}/sec"
+              echo "  Error rate: ${ERROR_RATE:-0}%"
+            fi
+          register: anomaly
+          changed_when: false
+
+        - name: "ANOMALY: Display"
+          ansible.builtin.debug:
+            msg: "{{ anomaly.stdout }}"
+
+    # =========================================================================
+    # CONNECTIONS - Deep connection analysis
+    # =========================================================================
+    - name: "CONNECTIONS: Deep connection analysis"
+      tags: [connections, never]
+      block:
+        - name: "CONNECTIONS: Analyze"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - CONNECTION ANALYSIS ==="
+            echo ""
+
+            # Connection state distribution
+            echo "--- CONNECTION STATES ---"
+            ss -tan | awk 'NR>1 {print $1}' | sort | uniq -c | sort -rn
+            echo ""
+
+            # Connections per port
+            echo "--- CONNECTIONS BY LOCAL PORT ---"
+            ss -tan state established | awk '{print $4}' | grep -oE ':[0-9]+$' | sort | uniq -c | sort -rn | head -10
+            echo ""
+
+            # Top remote IPs
+            echo "--- TOP REMOTE IPs ---"
+            ss -tan state established | awk '{print $5}' | cut -d: -f1 | sort | uniq -c | sort -rn | head -20
+            echo ""
+
+            # Connections per remote IP:port (detect scanners)
+            echo "--- TOP REMOTE IP:PORT PAIRS ---"
+            ss -tan state established | awk '{print $5}' | sort | uniq -c | sort -rn | head -10
+            echo ""
+
+            # Check for slowloris (many connections, few completing)
+            echo "--- SLOWLORIS CHECK ---"
+            ESTABLISHED=$(ss -tan state established | wc -l)
+            FIN_WAIT=$(ss -tan state fin-wait-1 state fin-wait-2 | wc -l)
+            echo "Established: $ESTABLISHED"
+            echo "FIN-WAIT: $FIN_WAIT"
+            if [ "$ESTABLISHED" -gt 100 ] && [ "$FIN_WAIT" -lt 10 ]; then
+              echo "WARNING: High established, low FIN-WAIT ratio - possible slowloris"
+            else
+              echo "OK: Connection completion ratio normal"
+            fi
+            echo ""
+
+            # Listen queues
+            echo "--- LISTEN QUEUE STATUS ---"
+            ss -ltn | head -20
+          register: connections
+          changed_when: false
+
+        - name: "CONNECTIONS: Display"
+          ansible.builtin.debug:
+            msg: "{{ connections.stdout }}"
+
+    # =========================================================================
+    # GEO - Geographic distribution (requires geoiplookup)
+    # =========================================================================
+    - name: "GEO: Geographic distribution"
+      tags: [geo, never]
+      block:
+        - name: "GEO: Analyze source countries"
+          ansible.builtin.shell: |
+            echo "=== {{ inventory_hostname | upper }} - GEOGRAPHIC ANALYSIS ==="
+            echo ""
+
+            # Get unique IPs from connections
+            echo "--- TOP SOURCE IPs ---"
+            ss -tan state established | awk '{print $5}' | cut -d: -f1 | grep -E '^[0-9]+\.' | sort | uniq -c | sort -rn | head -20
+            echo ""
+
+            # Check for geographic tools
+            if command -v geoiplookup &> /dev/null; then
+              echo "--- COUNTRY DISTRIBUTION ---"
+              ss -tan state established | awk '{print $5}' | cut -d: -f1 | grep -E '^[0-9]+\.' | sort -u | while read ip; do
+                geoiplookup "$ip" 2>/dev/null | head -1
+              done | sort | uniq -c | sort -rn | head -10
+            else
+              echo "Note: Install geoip-bin for country lookup"
+              echo "  apt-get install geoip-bin geoip-database"
+            fi
+            echo ""
+
+            # Check fail2ban for banned IPs
+            echo "--- FAIL2BAN STATUS ---"
+            if command -v fail2ban-client &> /dev/null; then
+              fail2ban-client status sshd 2>/dev/null | grep -E "Currently|Total" || echo "fail2ban not active for sshd"
+            else
+              echo "fail2ban not installed"
+            fi
+          register: geo
+          changed_when: false
+
+        - name: "GEO: Display"
+          ansible.builtin.debug:
+            msg: "{{ geo.stdout }}"
+
+    # =========================================================================
+    # BASELINE - Capture baseline for comparison
+    # =========================================================================
+    - name: "BASELINE: Capture current baseline"
+      tags: [baseline, never]
+      block:
+        - name: "BASELINE: Record metrics"
+          ansible.builtin.shell: |
+            BASELINE_FILE="/opt/ciris/traffic_baseline.json"
+            echo "=== {{ inventory_hostname | upper }} - BASELINE CAPTURE ==="
+            echo ""
+
+            # Gather metrics
+            CONN=$(ss -tan state established | wc -l)
+            SYN=$(ss -tan state syn-recv | wc -l)
+            REQ_1M=$(docker logs ciris-caddy --since 1m 2>&1 | grep -c "HTTP" || echo 0)
+            RPS=$((REQ_1M / 60))
+
+            # Save baseline
+            cat > "$BASELINE_FILE" << EOF
+            {
+              "timestamp": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
+              "connections": $CONN,
+              "syn_recv": $SYN,
+              "rps": $RPS
+            }
+            EOF
+
+            echo "Baseline saved to $BASELINE_FILE"
+            cat "$BASELINE_FILE"
+          register: baseline
+          changed_when: false
+
+        - name: "BASELINE: Display"
+          ansible.builtin.debug:
+            msg: "{{ baseline.stdout }}"
