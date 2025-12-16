@@ -1,0 +1,10 @@
+[Unit]
+Description=CIRISBridge Weekly Cleanup Timer (Saturday 03:00 UTC)
+
+[Timer]
+OnCalendar=Sat *-*-* 03:00:00 UTC
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=CIRISBridge Daily Health Checks
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ciris/scheduler/ciris-daily-checks.sh
+User=root
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

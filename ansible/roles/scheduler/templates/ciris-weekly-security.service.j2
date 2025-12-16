@@ -1,0 +1,15 @@
+[Unit]
+Description=CIRISBridge Weekly Security Scan
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ciris/scheduler/ciris-weekly-security.sh
+User=root
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,126 @@
+#!/bin/bash
+# CIRISBridge Weekly Cleanup
+# Cleans Docker resources and logs, reports to CIRISLens
+# Managed by Ansible - do not edit manually
+
+set -euo pipefail
+
+LENS_ENDPOINT="{{ cirislens_endpoint }}/api/v1/logs/ingest"
+SERVICE_TOKEN="{{ scheduler_service_token }}"
+NODE_NAME="{{ node_name }}"
+
+# Thresholds
+LOG_SIZE_THRESHOLD=104857600  # 100MB
+LOG_LINES_TO_KEEP=1000
+BUILD_CACHE_AGE=72  # hours
+JOURNAL_RETENTION_DAYS=7
+
+log_to_lens() {
+  local level="$1"
+  local message="$2"
+  local event="$3"
+  local metadata="$4"
+
+  curl -s -X POST "${LENS_ENDPOINT}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${SERVICE_TOKEN}" \
+    -d "{
+      \"service_name\": \"ciris-scheduler\",
+      \"level\": \"${level}\",
+      \"message\": \"${message}\",
+      \"event\": \"${event}\",
+      \"node\": \"${NODE_NAME}\",
+      \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\",
+      \"metadata\": ${metadata}
+    }" \
+    --connect-timeout 5 \
+    --max-time 10 \
+    >/dev/null 2>&1 || true
+}
+
+echo "=== CIRISBridge Weekly Cleanup - ${NODE_NAME} - $(date -u) ==="
+
+# ============================================================================
+# BEFORE STATUS
+# ============================================================================
+echo ""
+echo "--- Before Cleanup ---"
+DISK_BEFORE=$(df -h / | awk 'NR==2 {print $4}')
+DOCKER_BEFORE=$(docker system df --format '{% raw %}{{.Size}}{% endraw %}' | head -1 2>/dev/null || echo "unknown")
+
+echo "Available disk space: $DISK_BEFORE"
+echo "Docker total size: $DOCKER_BEFORE"
+
+# ============================================================================
+# DOCKER CLEANUP
+# ============================================================================
+echo ""
+echo "--- Docker Cleanup ---"
+
+# Remove stopped containers
+echo "Removing stopped containers..."
+CONTAINER_RECLAIMED=$(docker container prune -f 2>/dev/null | grep "reclaimed" | grep -oE '[0-9.]+[GMK]?B' || echo "0B")
+echo "  Reclaimed: $CONTAINER_RECLAIMED"
+
+# Remove dangling images
+echo "Removing dangling images..."
+IMAGE_RECLAIMED=$(docker image prune -f 2>/dev/null | grep "reclaimed" | grep -oE '[0-9.]+[GMK]?B' || echo "0B")
+echo "  Reclaimed: $IMAGE_RECLAIMED"
+
+# Remove unused networks
+echo "Removing unused networks..."
+docker network prune -f >/dev/null 2>&1 || true
+
+# Remove old build cache
+echo "Removing build cache older than ${BUILD_CACHE_AGE}h..."
+BUILDER_RECLAIMED=$(docker builder prune -f --filter until=${BUILD_CACHE_AGE}h 2>/dev/null | grep "reclaimed" | grep -oE '[0-9.]+[GMK]?B' || echo "0B")
+echo "  Reclaimed: $BUILDER_RECLAIMED"
+
+# ============================================================================
+# LOG CLEANUP
+# ============================================================================
+echo ""
+echo "--- Log Cleanup ---"
+
+# Truncate large container logs
+TRUNCATED=0
+for log in $(find /var/lib/docker/containers -name "*-json.log" -size +${LOG_SIZE_THRESHOLD}c 2>/dev/null); do
+  LOG_SIZE=$(ls -lh "$log" | awk '{print $5}')
+  echo "Truncating: $log ($LOG_SIZE)"
+  tail -n ${LOG_LINES_TO_KEEP} "$log" > "$log.tmp"
+  mv "$log.tmp" "$log"
+  TRUNCATED=$((TRUNCATED + 1))
+done
+echo "Truncated $TRUNCATED container log files"
+
+# Rotate system journal
+echo "Rotating system journal (keep ${JOURNAL_RETENTION_DAYS} days)..."
+JOURNAL_FREED=$(journalctl --vacuum-time=${JOURNAL_RETENTION_DAYS}d 2>&1 | grep -oE 'freed [0-9.]+[GMK]?B' || echo "freed 0B")
+echo "  $JOURNAL_FREED"
+
+# ============================================================================
+# AFTER STATUS
+# ============================================================================
+echo ""
+echo "--- After Cleanup ---"
+DISK_AFTER=$(df -h / | awk 'NR==2 {print $4}')
+DOCKER_AFTER=$(docker system df --format '{% raw %}{{.Size}}{% endraw %}' | head -1 2>/dev/null || echo "unknown")
+
+echo "Available disk space: $DISK_AFTER (was: $DISK_BEFORE)"
+echo "Docker total size: $DOCKER_AFTER (was: $DOCKER_BEFORE)"
+
+# ============================================================================
+# SUMMARY
+# ============================================================================
+echo ""
+echo "=== Cleanup Summary ==="
+echo "Container cleanup: $CONTAINER_RECLAIMED"
+echo "Image cleanup: $IMAGE_RECLAIMED"
+echo "Builder cleanup: $BUILDER_RECLAIMED"
+echo "Logs truncated: $TRUNCATED files"
+echo "Journal: $JOURNAL_FREED"
+
+log_to_lens "INFO" "Weekly cleanup completed" "weekly_cleanup_complete" "{\"disk_before\": \"${DISK_BEFORE}\", \"disk_after\": \"${DISK_AFTER}\", \"logs_truncated\": ${TRUNCATED}}"
+
+echo ""
+echo "=== Weekly cleanup complete ==="

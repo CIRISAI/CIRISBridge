@@ -1,0 +1,16 @@
+[Unit]
+Description=CIRISBridge Weekly Cleanup
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ciris/scheduler/ciris-weekly-cleanup.sh
+User=root
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

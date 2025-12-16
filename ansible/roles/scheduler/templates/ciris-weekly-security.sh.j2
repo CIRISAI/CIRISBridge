@@ -1,0 +1,218 @@
+#!/bin/bash
+# CIRISBridge Weekly Security Scan
+# Checks security posture and reports to CIRISLens
+# Managed by Ansible - do not edit manually
+
+set -euo pipefail
+
+LENS_ENDPOINT="{{ cirislens_endpoint }}/api/v1/logs/ingest"
+SERVICE_TOKEN="{{ scheduler_service_token }}"
+NODE_NAME="{{ node_name }}"
+
+log_to_lens() {
+  local level="$1"
+  local message="$2"
+  local event="$3"
+  local metadata="$4"
+
+  curl -s -X POST "${LENS_ENDPOINT}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${SERVICE_TOKEN}" \
+    -d "{
+      \"service_name\": \"ciris-scheduler\",
+      \"level\": \"${level}\",
+      \"message\": \"${message}\",
+      \"event\": \"${event}\",
+      \"node\": \"${NODE_NAME}\",
+      \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\",
+      \"metadata\": ${metadata}
+    }" \
+    --connect-timeout 5 \
+    --max-time 10 \
+    >/dev/null 2>&1 || true
+}
+
+echo "=== CIRISBridge Weekly Security Scan - ${NODE_NAME} - $(date -u) ==="
+
+SECURITY_ISSUES=0
+SECURITY_FINDINGS=""
+
+# ============================================================================
+# SSH CONFIGURATION CHECK
+# ============================================================================
+echo ""
+echo "--- SSH Security Check ---"
+
+SSH_CONFIG=$(sshd -T 2>/dev/null)
+PASSWORD_AUTH=$(echo "$SSH_CONFIG" | grep -i "^passwordauthentication" | awk '{print $2}')
+PUBKEY_AUTH=$(echo "$SSH_CONFIG" | grep -i "^pubkeyauthentication" | awk '{print $2}')
+
+if [ "$PASSWORD_AUTH" = "yes" ]; then
+  echo "WARNING: SSH password authentication is enabled"
+  SECURITY_ISSUES=$((SECURITY_ISSUES + 1))
+  SECURITY_FINDINGS="${SECURITY_FINDINGS}ssh_password_enabled,"
+else
+  echo "OK: SSH password authentication disabled"
+fi
+
+if [ "$PUBKEY_AUTH" != "yes" ]; then
+  echo "WARNING: SSH public key authentication not enabled"
+  SECURITY_ISSUES=$((SECURITY_ISSUES + 1))
+  SECURITY_FINDINGS="${SECURITY_FINDINGS}ssh_pubkey_disabled,"
+else
+  echo "OK: SSH public key authentication enabled"
+fi
+
+# ============================================================================
+# FIREWALL CHECK
+# ============================================================================
+echo ""
+echo "--- Firewall Check ---"
+
+if command -v ufw &> /dev/null; then
+  UFW_STATUS=$(ufw status 2>/dev/null | head -1)
+  if echo "$UFW_STATUS" | grep -q "active"; then
+    echo "OK: UFW firewall is active"
+    OPEN_PORTS=$(ufw status | grep -c "ALLOW" || echo "0")
+    echo "  Open ports: $OPEN_PORTS rules"
+  else
+    echo "CRITICAL: UFW firewall is not active"
+    SECURITY_ISSUES=$((SECURITY_ISSUES + 1))
+    SECURITY_FINDINGS="${SECURITY_FINDINGS}ufw_inactive,"
+  fi
+else
+  echo "WARNING: UFW not installed"
+  SECURITY_ISSUES=$((SECURITY_ISSUES + 1))
+  SECURITY_FINDINGS="${SECURITY_FINDINGS}ufw_missing,"
+fi
+
+# ============================================================================
+# FAIL2BAN CHECK
+# ============================================================================
+echo ""
+echo "--- Fail2ban Check ---"
+
+if systemctl is-active --quiet fail2ban 2>/dev/null; then
+  echo "OK: Fail2ban is running"
+  if command -v fail2ban-client &> /dev/null; then
+    BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}' || echo "0")
+    TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}' || echo "0")
+    echo "  Currently banned: $BANNED, Total banned: $TOTAL_BANNED"
+  fi
+else
+  echo "WARNING: Fail2ban is not running"
+  SECURITY_ISSUES=$((SECURITY_ISSUES + 1))
+  SECURITY_FINDINGS="${SECURITY_FINDINGS}fail2ban_inactive,"
+fi
+
+# ============================================================================
+# SECURITY UPDATES CHECK
+# ============================================================================
+echo ""
+echo "--- Security Updates Check ---"
+
+if command -v apt &> /dev/null; then
+  apt update -qq 2>/dev/null
+  SECURITY_UPDATES=$(apt list --upgradable 2>/dev/null | grep -c "security" || echo "0")
+  TOTAL_UPDATES=$(apt list --upgradable 2>/dev/null | grep -c "/" || echo "0")
+
+  if [ "$SECURITY_UPDATES" -gt 0 ]; then
+    echo "WARNING: $SECURITY_UPDATES security updates available"
+    SECURITY_ISSUES=$((SECURITY_ISSUES + 1))
+    SECURITY_FINDINGS="${SECURITY_FINDINGS}security_updates_${SECURITY_UPDATES},"
+  else
+    echo "OK: No security updates pending"
+  fi
+  echo "  Total updates available: $TOTAL_UPDATES"
+fi
+
+# ============================================================================
+# DOCKER SECURITY CHECK
+# ============================================================================
+echo ""
+echo "--- Docker Security Check ---"
+
+# Check for containers running as root
+ROOT_CONTAINERS=$(docker ps --format '{% raw %}{{.Names}}{% endraw %}' | while read name; do
+  USER=$(docker inspect "$name" --format '{% raw %}{{.Config.User}}{% endraw %}' 2>/dev/null || echo "root")
+  if [ -z "$USER" ] || [ "$USER" = "root" ] || [ "$USER" = "0" ]; then
+    echo "$name"
+  fi
+done | tr '\n' ',' | sed 's/,$//')
+
+if [ -n "$ROOT_CONTAINERS" ]; then
+  echo "INFO: Containers running as root: $ROOT_CONTAINERS"
+  # Not counting as security issue - expected for infrastructure containers
+fi
+
+# Check for privileged containers
+PRIVILEGED=$(docker ps --format '{% raw %}{{.Names}}{% endraw %}' | while read name; do
+  if docker inspect "$name" --format '{% raw %}{{.HostConfig.Privileged}}{% endraw %}' 2>/dev/null | grep -q "true"; then
+    echo "$name"
+  fi
+done | tr '\n' ',' | sed 's/,$//')
+
+if [ -n "$PRIVILEGED" ]; then
+  echo "WARNING: Privileged containers: $PRIVILEGED"
+  SECURITY_ISSUES=$((SECURITY_ISSUES + 1))
+  SECURITY_FINDINGS="${SECURITY_FINDINGS}privileged_containers,"
+else
+  echo "OK: No privileged containers"
+fi
+
+# ============================================================================
+# LISTENING PORTS CHECK
+# ============================================================================
+echo ""
+echo "--- Listening Ports Check ---"
+
+echo "External listening ports:"
+ss -tlnp | grep -E "0\.0\.0\.0|::" | awk '{print $4}' | sort -u | while read port; do
+  echo "  $port"
+done
+
+# ============================================================================
+# FILE PERMISSIONS CHECK
+# ============================================================================
+echo ""
+echo "--- Sensitive File Permissions ---"
+
+# Check SSH key permissions
+if [ -d /root/.ssh ]; then
+  SSH_PERMS=$(stat -c "%a" /root/.ssh 2>/dev/null || echo "unknown")
+  if [ "$SSH_PERMS" != "700" ] && [ "$SSH_PERMS" != "unknown" ]; then
+    echo "WARNING: /root/.ssh has insecure permissions: $SSH_PERMS"
+    SECURITY_ISSUES=$((SECURITY_ISSUES + 1))
+    SECURITY_FINDINGS="${SECURITY_FINDINGS}ssh_dir_perms,"
+  else
+    echo "OK: /root/.ssh permissions correct"
+  fi
+fi
+
+# Check for world-readable sensitive files
+WORLD_READABLE=$(find /opt/ciris -type f -name "*.env" -perm /004 2>/dev/null | head -5 || echo "")
+if [ -n "$WORLD_READABLE" ]; then
+  echo "WARNING: World-readable env files found"
+  SECURITY_ISSUES=$((SECURITY_ISSUES + 1))
+  SECURITY_FINDINGS="${SECURITY_FINDINGS}world_readable_env,"
+else
+  echo "OK: No world-readable env files"
+fi
+
+# ============================================================================
+# SUMMARY
+# ============================================================================
+echo ""
+echo "=== Security Scan Summary ==="
+echo "Total issues found: $SECURITY_ISSUES"
+
+if [ "$SECURITY_ISSUES" -gt 0 ]; then
+  echo "Findings: $SECURITY_FINDINGS"
+  log_to_lens "WARNING" "Security scan found ${SECURITY_ISSUES} issue(s)" "security_scan_warning" "{\"issues\": ${SECURITY_ISSUES}, \"findings\": \"${SECURITY_FINDINGS}\"}"
+else
+  echo "No security issues detected"
+  log_to_lens "INFO" "Security scan passed" "security_scan_passed" "{\"issues\": 0}"
+fi
+
+echo ""
+echo "=== Weekly security scan complete ==="

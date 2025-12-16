@@ -74,3 +74,9 @@ all:
     lens_grafana_secret_key: "CHANGE_ME"  # Grafana secret key
     lens_allowed_domain: ciris.ai  # OAuth domain restriction
     lens_public_dashboards: false  # Set true for anonymous read access
+
+    # Scheduler (systemd timers for health checks)
+    # Token must be created in cirislens.service_tokens table:
+    # INSERT INTO cirislens.service_tokens (service_name, token_hash, description)
+    # VALUES ('ciris-scheduler', encode(sha256('YOUR_TOKEN'::bytea), 'hex'), 'Scheduler heartbeat');
+    scheduler_service_token: "CHANGE_ME"  # Service token for CIRISLens API

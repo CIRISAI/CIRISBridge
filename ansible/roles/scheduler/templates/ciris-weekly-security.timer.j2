@@ -1,0 +1,10 @@
+[Unit]
+Description=CIRISBridge Weekly Security Scan Timer (Sunday 04:00 UTC)
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00 UTC
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

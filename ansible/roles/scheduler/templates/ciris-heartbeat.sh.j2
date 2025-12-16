@@ -1,0 +1,48 @@
+#!/bin/bash
+# CIRISBridge Scheduler Heartbeat
+# Posts heartbeat to CIRISLens every 5 minutes
+# Managed by Ansible - do not edit manually
+
+set -euo pipefail
+
+LENS_ENDPOINT="{{ cirislens_endpoint }}/api/v1/logs/ingest"
+SERVICE_TOKEN="{{ scheduler_service_token }}"
+NODE_NAME="{{ node_name }}"
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Build heartbeat payload
+PAYLOAD=$(cat <<EOF
+{
+  "service_name": "ciris-scheduler",
+  "level": "INFO",
+  "message": "scheduler_heartbeat",
+  "event": "heartbeat",
+  "node": "${NODE_NAME}",
+  "timestamp": "${TIMESTAMP}",
+  "metadata": {
+    "uptime": "$(uptime -p)",
+    "load": "$(cat /proc/loadavg | cut -d' ' -f1-3)"
+  }
+}
+EOF
+)
+
+# Post to CIRISLens (timeout 10s, retry once)
+RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${LENS_ENDPOINT}" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${SERVICE_TOKEN}" \
+  -d "${PAYLOAD}" \
+  --connect-timeout 5 \
+  --max-time 10 \
+  2>/dev/null || echo -e "\n000")
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+
+if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+  echo "[$(date -u +"%Y-%m-%d %H:%M:%S UTC")] Heartbeat sent successfully (HTTP ${HTTP_CODE})"
+  exit 0
+else
+  echo "[$(date -u +"%Y-%m-%d %H:%M:%S UTC")] Heartbeat failed (HTTP ${HTTP_CODE})" >&2
+  # Don't exit 1 - we don't want systemd to mark as failed for transient network issues
+  exit 0
+fi

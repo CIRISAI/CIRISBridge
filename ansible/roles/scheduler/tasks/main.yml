@@ -1,0 +1,147 @@
+# CIRISBridge Scheduler Role
+# Deploys systemd timers for health checks and maintenance tasks
+# Sends heartbeats and results to CIRISLens
+---
+- name: Create scheduler directory
+  ansible.builtin.file:
+    path: /opt/ciris/scheduler
+    state: directory
+    mode: "0750"
+    owner: root
+    group: root
+
+# ============================================================================
+# DEPLOY SCRIPTS
+# ============================================================================
+- name: Deploy heartbeat script
+  ansible.builtin.template:
+    src: ciris-heartbeat.sh.j2
+    dest: /opt/ciris/scheduler/ciris-heartbeat.sh
+    mode: "0750"
+    owner: root
+    group: root
+  notify: Restart heartbeat timer
+
+- name: Deploy daily checks script
+  ansible.builtin.template:
+    src: ciris-daily-checks.sh.j2
+    dest: /opt/ciris/scheduler/ciris-daily-checks.sh
+    mode: "0750"
+    owner: root
+    group: root
+
+- name: Deploy weekly security script
+  ansible.builtin.template:
+    src: ciris-weekly-security.sh.j2
+    dest: /opt/ciris/scheduler/ciris-weekly-security.sh
+    mode: "0750"
+    owner: root
+    group: root
+
+- name: Deploy weekly cleanup script
+  ansible.builtin.template:
+    src: ciris-weekly-cleanup.sh.j2
+    dest: /opt/ciris/scheduler/ciris-weekly-cleanup.sh
+    mode: "0750"
+    owner: root
+    group: root
+
+# ============================================================================
+# DEPLOY SYSTEMD SERVICES
+# ============================================================================
+- name: Deploy heartbeat service
+  ansible.builtin.template:
+    src: ciris-heartbeat.service.j2
+    dest: /etc/systemd/system/ciris-heartbeat.service
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Deploy daily checks service
+  ansible.builtin.template:
+    src: ciris-daily-checks.service.j2
+    dest: /etc/systemd/system/ciris-daily-checks.service
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Deploy weekly security service
+  ansible.builtin.template:
+    src: ciris-weekly-security.service.j2
+    dest: /etc/systemd/system/ciris-weekly-security.service
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Deploy weekly cleanup service
+  ansible.builtin.template:
+    src: ciris-weekly-cleanup.service.j2
+    dest: /etc/systemd/system/ciris-weekly-cleanup.service
+    mode: "0644"
+  notify: Reload systemd
+
+# ============================================================================
+# DEPLOY SYSTEMD TIMERS
+# ============================================================================
+- name: Deploy heartbeat timer
+  ansible.builtin.template:
+    src: ciris-heartbeat.timer.j2
+    dest: /etc/systemd/system/ciris-heartbeat.timer
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Enable heartbeat timer
+
+- name: Deploy daily checks timer
+  ansible.builtin.template:
+    src: ciris-daily-checks.timer.j2
+    dest: /etc/systemd/system/ciris-daily-checks.timer
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Enable daily checks timer
+
+- name: Deploy weekly security timer
+  ansible.builtin.template:
+    src: ciris-weekly-security.timer.j2
+    dest: /etc/systemd/system/ciris-weekly-security.timer
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Enable weekly security timer
+
+- name: Deploy weekly cleanup timer
+  ansible.builtin.template:
+    src: ciris-weekly-cleanup.timer.j2
+    dest: /etc/systemd/system/ciris-weekly-cleanup.timer
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Enable weekly cleanup timer
+
+# ============================================================================
+# ENSURE TIMERS ARE ENABLED AND STARTED
+# ============================================================================
+- name: Ensure all timers are enabled and started
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  loop:
+    - ciris-heartbeat.timer
+    - ciris-daily-checks.timer
+    - ciris-weekly-security.timer
+    - ciris-weekly-cleanup.timer
+
+# ============================================================================
+# INITIAL HEARTBEAT TEST
+# ============================================================================
+- name: Run initial heartbeat test
+  ansible.builtin.command:
+    cmd: /opt/ciris/scheduler/ciris-heartbeat.sh
+  register: heartbeat_test
+  changed_when: false
+  failed_when: false
+
+- name: Display heartbeat test result
+  ansible.builtin.debug:
+    msg: "{{ heartbeat_test.stdout }}"
+  when: heartbeat_test.stdout | length > 0

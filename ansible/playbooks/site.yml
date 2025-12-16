@@ -58,6 +58,13 @@
     - lens
   tags: [lens]
 
+- name: Deploy Scheduler (systemd timers for health checks)
+  hosts: all
+  become: true
+  roles:
+    - scheduler
+  tags: [scheduler]
+
 - name: Sync DNS records to Redis (both nodes)
   hosts: all
   become: true

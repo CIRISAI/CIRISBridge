@@ -1,0 +1,15 @@
+---
+# CIRISBridge Scheduler Role Defaults
+
+# CIRISLens endpoint for log shipping
+# Uses the primary domain (US node) since CIRISLens only runs there
+cirislens_endpoint: "https://lens.{{ primary_domain }}"
+
+# Service token for authenticating with CIRISLens
+# Must be created in cirislens.service_tokens table
+# scheduler_service_token: "SET_IN_INVENTORY"
+
+# Node-specific settings (set per host in inventory)
+# node_name: "us" or "eu"
+# primary_domain: "ciris-services-1.ai"
+# secondary_domain: "ciris-services-2.ai"

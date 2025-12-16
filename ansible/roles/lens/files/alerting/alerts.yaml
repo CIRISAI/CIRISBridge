@@ -155,6 +155,128 @@ groups:
           severity: critical
         isPaused: false
 
+      # Alert when scheduler heartbeat is missing from US node
+      - uid: heartbeat-missing-us-alert
+        title: Scheduler Heartbeat Missing (US)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: postgresql
+            model:
+              rawSql: |
+                SELECT
+                  NOW() as time,
+                  COUNT(*) as value
+                FROM cirislens.service_logs
+                WHERE service_name = 'ciris-scheduler'
+                  AND event = 'heartbeat'
+                  AND metadata->>'node' = 'us'
+                  AND timestamp > NOW() - INTERVAL '10 minutes'
+              format: table
+          - refId: B
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 2
+                    type: lt
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              type: threshold
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          summary: "Scheduler heartbeat missing from US node"
+          description: "The US node (Vultr) has sent fewer than 2 heartbeats in the last 10 minutes. Expected heartbeat every 5 minutes. Node may be down or scheduler service is failing."
+          runbook_url: "https://lens.ciris-services-1.ai/d/service-logs/service-logs"
+        labels:
+          severity: critical
+          node: us
+        isPaused: false
+
+      # Alert when scheduler heartbeat is missing from EU node
+      - uid: heartbeat-missing-eu-alert
+        title: Scheduler Heartbeat Missing (EU)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: postgresql
+            model:
+              rawSql: |
+                SELECT
+                  NOW() as time,
+                  COUNT(*) as value
+                FROM cirislens.service_logs
+                WHERE service_name = 'ciris-scheduler'
+                  AND event = 'heartbeat'
+                  AND metadata->>'node' = 'eu'
+                  AND timestamp > NOW() - INTERVAL '10 minutes'
+              format: table
+          - refId: B
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 2
+                    type: lt
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              type: threshold
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          summary: "Scheduler heartbeat missing from EU node"
+          description: "The EU node (Hetzner) has sent fewer than 2 heartbeats in the last 10 minutes. Expected heartbeat every 5 minutes. Node may be down or scheduler service is failing."
+          runbook_url: "https://lens.ciris-services-1.ai/d/service-logs/service-logs"
+        labels:
+          severity: critical
+          node: eu
+        isPaused: false
+
       # Alert when a specific service has errors
       - uid: billing-errors-alert
         title: Billing Service Errors

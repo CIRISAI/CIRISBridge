@@ -1,0 +1,196 @@
+#!/bin/bash
+# CIRISBridge Daily Health Checks
+# Runs cert-status and backup-verify checks, posts results to CIRISLens
+# Managed by Ansible - do not edit manually
+
+set -euo pipefail
+
+LENS_ENDPOINT="{{ cirislens_endpoint }}/api/v1/logs/ingest"
+SERVICE_TOKEN="{{ scheduler_service_token }}"
+NODE_NAME="{{ node_name }}"
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+log_to_lens() {
+  local level="$1"
+  local message="$2"
+  local event="$3"
+  local metadata="$4"
+
+  curl -s -X POST "${LENS_ENDPOINT}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${SERVICE_TOKEN}" \
+    -d "{
+      \"service_name\": \"ciris-scheduler\",
+      \"level\": \"${level}\",
+      \"message\": \"${message}\",
+      \"event\": \"${event}\",
+      \"node\": \"${NODE_NAME}\",
+      \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\",
+      \"metadata\": ${metadata}
+    }" \
+    --connect-timeout 5 \
+    --max-time 10 \
+    >/dev/null 2>&1 || true
+}
+
+echo "=== CIRISBridge Daily Checks - ${NODE_NAME} - $(date -u) ==="
+
+# ============================================================================
+# CERTIFICATE STATUS CHECK
+# ============================================================================
+echo ""
+echo "--- Certificate Status Check ---"
+
+{% if node_name == 'us' %}
+DOMAINS="billing1.{{ primary_domain }} proxy1.{{ primary_domain }} agents.{{ primary_domain }} lens.{{ primary_domain }}"
+{% else %}
+DOMAINS="billing1.{{ secondary_domain }} proxy1.{{ secondary_domain }} agents.{{ secondary_domain }}"
+{% endif %}
+
+CERT_ISSUES=0
+CERT_DETAILS=""
+
+for domain in $DOMAINS; do
+  CERT_INFO=$(echo | timeout 5 openssl s_client -servername "$domain" -connect "$domain:443" 2>/dev/null | openssl x509 -noout -dates 2>/dev/null || echo "ERROR")
+
+  if echo "$CERT_INFO" | grep -q "ERROR"; then
+    echo "FAILED: $domain - Cannot retrieve certificate"
+    CERT_ISSUES=$((CERT_ISSUES + 1))
+    CERT_DETAILS="${CERT_DETAILS}${domain}:FAILED,"
+    continue
+  fi
+
+  NOT_AFTER=$(echo "$CERT_INFO" | grep "notAfter" | cut -d= -f2)
+  EXPIRY_EPOCH=$(date -d "$NOT_AFTER" +%s 2>/dev/null || echo 0)
+  CURRENT_EPOCH=$(date +%s)
+  DAYS_REMAINING=$(( ($EXPIRY_EPOCH - $CURRENT_EPOCH) / 86400 ))
+
+  if [ "$DAYS_REMAINING" -lt 7 ]; then
+    echo "CRITICAL: $domain - Expires in $DAYS_REMAINING days"
+    CERT_ISSUES=$((CERT_ISSUES + 1))
+    CERT_DETAILS="${CERT_DETAILS}${domain}:${DAYS_REMAINING}d:CRITICAL,"
+  elif [ "$DAYS_REMAINING" -lt 30 ]; then
+    echo "WARNING: $domain - Expires in $DAYS_REMAINING days"
+    CERT_DETAILS="${CERT_DETAILS}${domain}:${DAYS_REMAINING}d:WARNING,"
+  else
+    echo "OK: $domain - $DAYS_REMAINING days remaining"
+    CERT_DETAILS="${CERT_DETAILS}${domain}:${DAYS_REMAINING}d:OK,"
+  fi
+done
+
+if [ "$CERT_ISSUES" -gt 0 ]; then
+  log_to_lens "ERROR" "Certificate issues detected: ${CERT_ISSUES} problem(s)" "cert_check_failed" "{\"issues\": ${CERT_ISSUES}, \"details\": \"${CERT_DETAILS}\"}"
+else
+  log_to_lens "INFO" "All certificates healthy" "cert_check_passed" "{\"details\": \"${CERT_DETAILS}\"}"
+fi
+
+# ============================================================================
+# BACKUP/REPLICATION STATUS CHECK
+# ============================================================================
+echo ""
+echo "--- PostgreSQL Replication Check ---"
+
+REPLICATION_OK=true
+REPLICATION_DETAILS=""
+
+# Check if PostgreSQL container is running
+if docker ps --format '{% raw %}{{.Names}}{% endraw %}' | grep -q '^ciris-postgres$'; then
+  # Check replication status
+  REPL_STATUS=$(docker exec ciris-postgres psql -U postgres -d ciris -t -c "
+    SELECT
+      subname,
+      CASE WHEN subenabled THEN 'enabled' ELSE 'disabled' END as status
+    FROM pg_subscription;
+  " 2>/dev/null || echo "ERROR")
+
+  if echo "$REPL_STATUS" | grep -q "ERROR"; then
+    echo "WARNING: Cannot query replication status"
+    REPLICATION_DETAILS="query_failed"
+  elif echo "$REPL_STATUS" | grep -q "disabled"; then
+    echo "CRITICAL: Replication subscription is disabled"
+    REPLICATION_OK=false
+    REPLICATION_DETAILS="subscription_disabled"
+  elif [ -z "$(echo "$REPL_STATUS" | tr -d '[:space:]')" ]; then
+    echo "WARNING: No replication subscription found"
+    REPLICATION_DETAILS="no_subscription"
+  else
+    echo "OK: Replication subscription active"
+    REPLICATION_DETAILS="active"
+  fi
+
+  # Check replication lag (if available)
+  LAG_STATUS=$(docker exec ciris-postgres psql -U postgres -d ciris -t -c "
+    SELECT COALESCE(
+      (SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint
+       FROM pg_replication_slots
+       WHERE slot_type = 'logical' LIMIT 1),
+      0
+    ) as lag_bytes;
+  " 2>/dev/null || echo "0")
+
+  LAG_BYTES=$(echo "$LAG_STATUS" | tr -d '[:space:]')
+  LAG_MB=$((LAG_BYTES / 1048576))
+
+  if [ "$LAG_MB" -gt 100 ]; then
+    echo "WARNING: Replication lag is ${LAG_MB}MB"
+    REPLICATION_DETAILS="${REPLICATION_DETAILS},lag_${LAG_MB}MB"
+  else
+    echo "OK: Replication lag is ${LAG_MB}MB"
+  fi
+else
+  echo "ERROR: PostgreSQL container not running"
+  REPLICATION_OK=false
+  REPLICATION_DETAILS="postgres_down"
+fi
+
+if [ "$REPLICATION_OK" = false ]; then
+  log_to_lens "ERROR" "PostgreSQL replication issue" "replication_check_failed" "{\"details\": \"${REPLICATION_DETAILS}\"}"
+else
+  log_to_lens "INFO" "PostgreSQL replication healthy" "replication_check_passed" "{\"details\": \"${REPLICATION_DETAILS}\", \"lag_mb\": ${LAG_MB:-0}}"
+fi
+
+# ============================================================================
+# DOCKER HEALTH CHECK
+# ============================================================================
+echo ""
+echo "--- Docker Container Health ---"
+
+UNHEALTHY_CONTAINERS=$(docker ps --filter "health=unhealthy" --format '{% raw %}{{.Names}}{% endraw %}' 2>/dev/null || echo "")
+STOPPED_CIRIS=$(docker ps -a --filter "status=exited" --format '{% raw %}{{.Names}}{% endraw %}' 2>/dev/null | grep -E '^ciris-' || echo "")
+
+if [ -n "$UNHEALTHY_CONTAINERS" ]; then
+  echo "WARNING: Unhealthy containers: $UNHEALTHY_CONTAINERS"
+  log_to_lens "WARNING" "Unhealthy containers detected" "container_health_warning" "{\"unhealthy\": \"${UNHEALTHY_CONTAINERS}\"}"
+elif [ -n "$STOPPED_CIRIS" ]; then
+  echo "WARNING: Stopped CIRIS containers: $STOPPED_CIRIS"
+  log_to_lens "WARNING" "Stopped CIRIS containers" "container_stopped_warning" "{\"stopped\": \"${STOPPED_CIRIS}\"}"
+else
+  echo "OK: All containers healthy"
+  log_to_lens "INFO" "All containers healthy" "container_health_passed" "{}"
+fi
+
+# ============================================================================
+# DISK SPACE CHECK
+# ============================================================================
+echo ""
+echo "--- Disk Space Check ---"
+
+DISK_USAGE=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
+DOCKER_USAGE=$(df -h /var/lib/docker 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%' || echo "$DISK_USAGE")
+
+if [ "$DISK_USAGE" -gt 90 ] || [ "$DOCKER_USAGE" -gt 90 ]; then
+  echo "CRITICAL: Disk usage critical - Root: ${DISK_USAGE}%, Docker: ${DOCKER_USAGE}%"
+  log_to_lens "ERROR" "Disk space critical" "disk_check_critical" "{\"root_percent\": ${DISK_USAGE}, \"docker_percent\": ${DOCKER_USAGE}}"
+elif [ "$DISK_USAGE" -gt 80 ] || [ "$DOCKER_USAGE" -gt 80 ]; then
+  echo "WARNING: Disk usage elevated - Root: ${DISK_USAGE}%, Docker: ${DOCKER_USAGE}%"
+  log_to_lens "WARNING" "Disk space warning" "disk_check_warning" "{\"root_percent\": ${DISK_USAGE}, \"docker_percent\": ${DOCKER_USAGE}}"
+else
+  echo "OK: Disk usage normal - Root: ${DISK_USAGE}%, Docker: ${DOCKER_USAGE}%"
+  log_to_lens "INFO" "Disk space healthy" "disk_check_passed" "{\"root_percent\": ${DISK_USAGE}, \"docker_percent\": ${DOCKER_USAGE}}"
+fi
+
+echo ""
+echo "=== Daily checks complete ==="
+
+# Final summary heartbeat
+log_to_lens "INFO" "Daily checks completed" "daily_checks_complete" "{\"cert_issues\": ${CERT_ISSUES}, \"replication_ok\": ${REPLICATION_OK}, \"disk_percent\": ${DISK_USAGE}}"
