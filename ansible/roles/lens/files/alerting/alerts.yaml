@@ -173,7 +173,7 @@ groups:
                 FROM cirislens.service_logs
                 WHERE service_name = 'ciris-scheduler'
                   AND event = 'heartbeat'
-                  AND metadata->>'node' = 'us'
+                  AND server_id = 'us'
                   AND timestamp > NOW() - INTERVAL '10 minutes'
               format: table
           - refId: B
@@ -234,7 +234,7 @@ groups:
                 FROM cirislens.service_logs
                 WHERE service_name = 'ciris-scheduler'
                   AND event = 'heartbeat'
-                  AND metadata->>'node' = 'eu'
+                  AND server_id = 'eu'
                   AND timestamp > NOW() - INTERVAL '10 minutes'
               format: table
           - refId: B

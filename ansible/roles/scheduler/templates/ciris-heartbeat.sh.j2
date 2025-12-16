@@ -5,21 +5,24 @@
 
 set -euo pipefail
 
-LENS_ENDPOINT="{{ cirislens_endpoint }}/api/v1/logs/ingest"
+LENS_ENDPOINT="{{ cirislens_endpoint }}/lens-api/api/v1/logs/ingest"
 SERVICE_TOKEN="{{ scheduler_service_token }}"
 NODE_NAME="{{ node_name }}"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # Build heartbeat payload
+# Use server_id for node identification (stored in DB)
+# Use attributes for extra metadata (JSONB column)
 PAYLOAD=$(cat <<EOF
 {
   "service_name": "ciris-scheduler",
+  "server_id": "${NODE_NAME}",
   "level": "INFO",
   "message": "scheduler_heartbeat",
   "event": "heartbeat",
-  "node": "${NODE_NAME}",
   "timestamp": "${TIMESTAMP}",
-  "metadata": {
+  "attributes": {
+    "node": "${NODE_NAME}",
     "uptime": "$(uptime -p)",
     "load": "$(cat /proc/loadavg | cut -d' ' -f1-3)"
   }
