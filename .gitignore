@@ -19,6 +19,7 @@ secrets/
 *.key
 id_rsa*
 *.crt
+extras/galactic-unicorn/secrets.py
 
 # Docker
 docker/.env

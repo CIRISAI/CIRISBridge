@@ -35,6 +35,15 @@ WIFI_PASSWORD = "YOUR_WIFI_PASSWORD"
 LENS_API_URL = "https://lens.ciris-services-1.ai"
 LENS_API_TOKEN = "YOUR_CIRISLENS_SERVICE_TOKEN"
 
+# To use local config, create secrets.py with your credentials:
+# WIFI_SSID = "your_ssid"
+# WIFI_PASSWORD = "your_password"
+# LENS_API_TOKEN = "your_token"
+try:
+    from secrets import WIFI_SSID, WIFI_PASSWORD, LENS_API_TOKEN
+except ImportError:
+    pass  # Use defaults above
+
 BILLING_US_URL = "https://billing1.ciris-services-1.ai"
 BILLING_EU_URL = "https://billing1.ciris-services-2.ai"
 PROXY_US_URL = "https://proxy1.ciris-services-1.ai"
