@@ -1,0 +1,107 @@
+---
+# Billing Rollback Runbook
+# Rolls back to the previous billing image if a deploy fails
+#
+# Usage:
+#   # Rollback both regions
+#   ansible-playbook -i inventory/production.yml runbooks/billing-rollback.yml
+#
+#   # Rollback specific region
+#   ansible-playbook -i inventory/production.yml runbooks/billing-rollback.yml --limit us
+#   ansible-playbook -i inventory/production.yml runbooks/billing-rollback.yml --limit eu
+#
+#   # Rollback to specific image
+#   ansible-playbook -i inventory/production.yml runbooks/billing-rollback.yml -e "rollback_image=sha256:abc123"
+
+- name: "BILLING ROLLBACK - Restore previous version"
+  hosts: all
+  become: true
+  vars:
+    billing_dir: /opt/ciris/billing
+
+  tasks:
+    - name: Check for rollback info
+      ansible.builtin.stat:
+        path: "{{ billing_dir }}/.rollback_info"
+      register: rollback_file
+
+    - name: Read rollback info
+      ansible.builtin.slurp:
+        src: "{{ billing_dir }}/.rollback_info"
+      register: rollback_info_raw
+      when: rollback_file.stat.exists and rollback_image is not defined
+
+    - name: Parse rollback info
+      ansible.builtin.set_fact:
+        previous_image: "{{ (rollback_info_raw.content | b64decode | regex_search('PREVIOUS_IMAGE=(.+)', '\\1'))[0] }}"
+        deploy_time: "{{ (rollback_info_raw.content | b64decode | regex_search('DEPLOY_TIME=(.+)', '\\1'))[0] }}"
+      when: rollback_file.stat.exists and rollback_image is not defined
+
+    - name: Use provided rollback image
+      ansible.builtin.set_fact:
+        previous_image: "{{ rollback_image }}"
+      when: rollback_image is defined
+
+    - name: Fail if no rollback info available
+      ansible.builtin.fail:
+        msg: |
+          No rollback info found at {{ billing_dir }}/.rollback_info
+          Specify image manually with: -e "rollback_image=sha256:..."
+      when: previous_image is not defined or previous_image == "none"
+
+    - name: Display rollback plan
+      ansible.builtin.debug:
+        msg: |
+          === BILLING ROLLBACK PLAN ===
+          Host: {{ inventory_hostname }}
+          Rolling back to: {{ previous_image }}
+          {% if deploy_time is defined %}
+          Last deploy was: {{ deploy_time }}
+          {% endif %}
+
+    - name: Stop current billing container
+      community.docker.docker_compose_v2:
+        project_src: "{{ billing_dir }}"
+        state: absent
+
+    - name: Update docker-compose to use previous image
+      ansible.builtin.lineinfile:
+        path: "{{ billing_dir }}/docker-compose.yml"
+        regexp: '^\s*image:'
+        line: "    image: {{ previous_image }}"
+      when: previous_image is not match('sha256:.*')
+
+    - name: Start billing with previous image
+      community.docker.docker_compose_v2:
+        project_src: "{{ billing_dir }}"
+        state: present
+        pull: "{{ 'always' if previous_image is not match('sha256:.*') else 'never' }}"
+
+    - name: Wait for Billing to be ready
+      ansible.builtin.uri:
+        url: "http://localhost:8080/health"
+        status_code: 200
+      register: health_result
+      retries: 15
+      delay: 5
+      until: health_result.status == 200
+
+    - name: Verify rollback successful
+      ansible.builtin.uri:
+        url: "http://localhost:8080/health"
+        status_code: 200
+        return_content: yes
+      register: smoke_health
+      failed_when: smoke_health.json.status != 'healthy'
+
+    - name: Rollback complete
+      ansible.builtin.debug:
+        msg: |
+          === ROLLBACK COMPLETE ===
+          Host: {{ inventory_hostname }}
+          Health: {{ smoke_health.json.status }}
+          Database: {{ smoke_health.json.database }}
+
+          NOTE: If this was due to a failed migration, you may need to
+          manually rollback the database with:
+            docker exec ciris-billing alembic downgrade -1

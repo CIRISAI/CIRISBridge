@@ -45,6 +45,13 @@ Agents cannot serve this mission if users cannot reach them. CIRISBridge provide
 | CIRISLens | Observability, log aggregation | `ghcr.io/cirisai/cirislens:latest` |
 | CIRISDNS | Authoritative DNS (Constellation) | `valeriansaliou/constellation:latest` |
 
+### Sibling Repo Notes
+
+**CIRISProxy (2025-12-17):** Now uses git submodule for CIRISLens SDK (`libs/cirislens/`).
+- Includes resilience patterns: CircuitBreaker, ExponentialBackoff (fixes LENS-001)
+- Clone with: `git clone --recurse-submodules`
+- Update with: `git submodule update --init --recursive`
+
 ## Current Infrastructure
 
 ### Nodes
@@ -69,6 +76,22 @@ Agents cannot serve this mission if users cannot reach them. CIRISBridge provide
 |---------|----------|
 | CIRISLens | `https://lens.ciris-services-1.ai` (US only) |
 | Agents API | `https://agents.ciris-services-1.ai` (alias for billing) |
+
+### Legacy Infrastructure (Pending Migration)
+
+These servers predate CIRISBridge and need DNS cutover. See `runbooks/legacy-migration.yml`.
+
+| Server | IP | Vultr ID | Status | Purpose |
+|--------|----|-----------| -------|---------|
+| llm | 149.28.113.123 | fed95dff-... | Running | Old proxy for llm.ciris.ai |
+| billing | 149.28.120.73 | 0d8a8c69-... | Running | Old billing for billing.ciris.ai |
+| cirisnode0 | 108.61.119.117 | 47c2431c-... | **Stopped** | Deprecated |
+
+**Migration plan:**
+1. Update Cloudflare DNS: `llm.ciris.ai` CNAME → `proxy1.ciris-services-1.ai`
+2. Update Cloudflare DNS: `billing.ciris.ai` CNAME → `billing1.ciris-services-1.ai`
+3. Monitor traffic shift for 24-48h
+4. Decommission legacy servers (~$30/month savings)
 
 ### Internal Ports (per node)
 
@@ -132,6 +155,29 @@ ansible all -i inventory/production.yml -m shell -a 'docker logs ciris-billing -
 ansible all -i inventory/production.yml -m shell -a 'systemctl list-timers | grep ciris'
 ```
 
+## Billing Update Lifecycle
+
+The billing role follows a structured deployment lifecycle:
+
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│  1. BACKUP  │ -> │  2. DEPLOY  │ -> │  3. MIGRATE │ -> │ 4. SMOKE    │ -> │  5. DONE    │
+│  Save image │    │  Pull new   │    │  Run alembic│    │    TEST     │    │  or ROLLBACK│
+│  for rollback    │  container  │    │  (US only)  │    │  Verify API │    │             │
+└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+```
+
+| Step | What Happens | On Failure |
+|------|--------------|------------|
+| Backup | Saves current image digest to `.rollback_info` | Continue |
+| Deploy | Pull latest image, restart container | Fail deploy |
+| Health Check | Wait for `/health` to return 200 (15 retries) | Fail deploy |
+| Migrate | Run `alembic upgrade head` on US node only | Fail deploy |
+| Smoke Test | Verify health=healthy, database=connected | Fail deploy |
+| Rollback | Use `billing-rollback.yml` runbook | Manual |
+
+**TODO:** OAuth-based smoke tests (new user signup, credit check, charge) pending test account setup.
+
 ## Scheduler (Automated Health Monitoring)
 
 Both nodes run systemd timers that post health data to CIRISLens:
@@ -181,9 +227,16 @@ Operational runbooks for incident response and infrastructure management are in 
 | `cert-status.yml` | TLS certificate expiration check |
 | `disk-cleanup.yml` | Docker/log cleanup with emergency mode |
 | `security-scan.yml` | SSH hardening, firewall, updates check |
+| `infra-status.yml` | Provider API status, bandwidth, anomaly detection |
 | `traffic-monitor.yml` | Network traffic analysis |
 | `log-audit.yml` | Service log analysis |
 | `image-update.yml` | Container image updates |
+
+**Service-Specific:**
+| Runbook | Purpose |
+|---------|---------|
+| `billing-rollback.yml` | Rollback billing to previous version |
+| `legacy-migration.yml` | Migrate from legacy servers to CIRISBridge |
 
 ### Common Runbook Commands
 
@@ -216,6 +269,22 @@ ansible-playbook -i inventory/production.yml runbooks/intrusion-response.yml -e 
 ansible-playbook -i inventory/production.yml runbooks/add-region.yml -e "new_region=ap"
 ansible-playbook -i inventory/production.yml runbooks/remove-region.yml -e "region=eu"
 ansible-playbook -i inventory/production.yml runbooks/remove-region.yml -e "region=eu" -e "force=true"
+
+# Infrastructure Status (Provider APIs)
+ansible-playbook -i inventory/production.yml runbooks/infra-status.yml
+ansible-playbook -i inventory/production.yml runbooks/infra-status.yml --tags vultr
+ansible-playbook -i inventory/production.yml runbooks/infra-status.yml --tags hetzner
+ansible-playbook -i inventory/production.yml runbooks/infra-status.yml --tags bandwidth
+
+# Billing Rollback
+ansible-playbook -i inventory/production.yml runbooks/billing-rollback.yml              # Both regions
+ansible-playbook -i inventory/production.yml runbooks/billing-rollback.yml --limit us   # US only
+ansible-playbook -i inventory/production.yml runbooks/billing-rollback.yml -e "rollback_image=ghcr.io/cirisai/cirisbilling:v0.0.9"
+
+# Legacy Migration (llm.ciris.ai, billing.ciris.ai -> CIRISBridge)
+ansible-playbook runbooks/legacy-migration.yml --tags validate      # Pre-cutover validation
+ansible-playbook runbooks/legacy-migration.yml --tags monitor       # Post-cutover monitoring
+VULTR_API_KEY=xxx ansible-playbook runbooks/legacy-migration.yml --tags decommission  # Delete legacy servers
 ```
 
 ### Severity Levels

@@ -1,5 +1,30 @@
 # Deploy CIRISBilling
+# Lifecycle: backup → deploy → migrate → smoke test → (rollback on failure)
 ---
+
+# =============================================================================
+# PRE-DEPLOY: Backup current state for rollback
+# =============================================================================
+- name: Get current billing image digest (for rollback)
+  ansible.builtin.shell: |
+    docker inspect ciris-billing --format '{{ '{{' }}.Image{{ '}}' }}' 2>/dev/null || echo "none"
+  register: current_image
+  changed_when: false
+  failed_when: false
+
+- name: Save rollback info
+  ansible.builtin.copy:
+    content: |
+      # Billing rollback info - {{ ansible_date_time.iso8601 }}
+      PREVIOUS_IMAGE={{ current_image.stdout }}
+      DEPLOY_TIME={{ ansible_date_time.iso8601 }}
+    dest: /opt/ciris/billing/.rollback_info
+    mode: "0600"
+  when: current_image.stdout != "none"
+
+# =============================================================================
+# DEPLOY: Update configuration and pull new image
+# =============================================================================
 - name: Copy Billing docker-compose
   ansible.builtin.template:
     src: docker-compose.yml.j2
@@ -24,18 +49,57 @@
     project_src: /opt/ciris/billing
     state: present
     pull: always
+  register: billing_deploy
 
+# =============================================================================
+# HEALTH CHECK: Wait for service to be ready
+# =============================================================================
 - name: Wait for Billing to be ready
   ansible.builtin.uri:
     url: "http://localhost:{{ billing_port }}/health"
     status_code: 200
-  register: result
+  register: health_result
   retries: 15
   delay: 5
-  until: result.status == 200
+  until: health_result.status == 200
 
+# =============================================================================
+# MIGRATE: Run database migrations (US node only)
+# =============================================================================
 - name: Run database migrations (US node only to avoid conflicts)
   community.docker.docker_container_exec:
     container: ciris-billing
     command: alembic upgrade head
   when: node_name == "us"
+  register: migration_result
+
+# =============================================================================
+# SMOKE TEST: Verify critical flows work
+# TODO: Implement after Google OAuth test account is set up
+# =============================================================================
+- name: "SMOKE TEST: Verify health endpoint returns healthy"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ billing_port }}/health"
+    status_code: 200
+    return_content: yes
+  register: smoke_health
+  failed_when: smoke_health.json.status != 'healthy'
+
+- name: "SMOKE TEST: Verify database connected"
+  ansible.builtin.assert:
+    that:
+      - smoke_health.json.database == 'connected'
+    fail_msg: "Database not connected after deploy"
+
+# TODO: Add OAuth-based smoke tests when test account is ready
+# - name: "SMOKE TEST: New user signup flow"
+# - name: "SMOKE TEST: Credit check for existing user"
+# - name: "SMOKE TEST: Charge transaction"
+
+- name: Log successful deployment
+  ansible.builtin.debug:
+    msg: |
+      Billing deployment successful on {{ inventory_hostname }}
+      - Health: {{ smoke_health.json.status }}
+      - Database: {{ smoke_health.json.database }}
+      - Migrations: {{ 'completed' if node_name == 'us' else 'skipped (EU node)' }}

@@ -56,3 +56,4 @@ htmlcov/
 .coverage
 ansible/.ansible_cache/
 ansible/.ansible/
+tickets/

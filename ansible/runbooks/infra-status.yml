@@ -1,0 +1,391 @@
+---
+# Infrastructure Status Runbook
+# Checks provider APIs for resource utilization and unusual activity
+#
+# Usage:
+#   # Full status check (all providers)
+#   ansible-playbook -i inventory/production.yml runbooks/infra-status.yml
+#
+#   # Vultr only
+#   ansible-playbook -i inventory/production.yml runbooks/infra-status.yml --tags vultr
+#
+#   # Hetzner only
+#   ansible-playbook -i inventory/production.yml runbooks/infra-status.yml --tags hetzner
+#
+#   # Bandwidth/traffic analysis
+#   ansible-playbook -i inventory/production.yml runbooks/infra-status.yml --tags bandwidth
+#
+#   # SSH keys audit
+#   ansible-playbook -i inventory/production.yml runbooks/infra-status.yml --tags ssh-keys
+
+- name: "INFRASTRUCTURE STATUS - Provider API Health Check"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vultr_api_key: "{{ lookup('file', '~/.ciris_bridge_keys/vultr_api_key') | default(lookup('file', '~/Desktop/ciris_transfer/.ciris_bridge_keys/vultr_api_key')) }}"
+    hetzner_api_token: "{{ lookup('file', '~/.ciris_bridge_keys/hetzner_api_token') | default(lookup('file', '~/Desktop/ciris_transfer/.ciris_bridge_keys/hetzner_api_token')) }}"
+    # Known CIRIS infrastructure
+    known_vultr_instances:
+      - "cirisbridge-us"
+      - "cirisnode0"
+      - "billing"
+      - "scout"
+      - "scout2"
+      - "llm"
+    known_hetzner_servers:
+      - "cirisbridge-eu"
+
+  tasks:
+    # =========================================================================
+    # VULTR - Instance and resource status
+    # =========================================================================
+    - name: "VULTR: Get all instances"
+      tags: [vultr, always]
+      block:
+        - name: "VULTR: Fetch instances from API"
+          ansible.builtin.uri:
+            url: "https://api.vultr.com/v2/instances"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ vultr_api_key }}"
+            return_content: yes
+          register: vultr_instances
+          failed_when: false
+
+        - name: "VULTR: Display instance summary"
+          ansible.builtin.debug:
+            msg: |
+              === VULTR INSTANCES ({{ vultr_instances.json.meta.total | default(0) }} total) ===
+              {% for instance in vultr_instances.json.instances | default([]) %}
+
+              {{ instance.label }}:
+                ID: {{ instance.id }}
+                IP: {{ instance.main_ip }}
+                Status: {{ instance.status }} / {{ instance.power_status }} / {{ instance.server_status }}
+                Region: {{ instance.region }}
+                Plan: {{ instance.plan }}
+                OS: {{ instance.os }}
+                RAM: {{ instance.ram }}MB / vCPU: {{ instance.vcpu_count }} / Disk: {{ instance.disk }}GB
+                Created: {{ instance.date_created }}
+                Bandwidth: {{ instance.allowed_bandwidth }}GB allowed
+                Tags: {{ instance.tags | join(', ') or 'none' }}
+                Firewall: {{ instance.firewall_group_id or 'NONE - WARNING' }}
+                {% if instance.label not in known_vultr_instances %}
+                ⚠ WARNING: Unknown instance - verify this is expected
+                {% endif %}
+              {% endfor %}
+          when: vultr_instances.status == 200
+
+        - name: "VULTR: Check for anomalies"
+          ansible.builtin.debug:
+            msg: |
+              === VULTR ANOMALY CHECK ===
+              {% set anomalies = [] %}
+              {% for instance in vultr_instances.json.instances | default([]) %}
+              {% if instance.status != 'active' %}
+              {% set _ = anomalies.append('Instance ' ~ instance.label ~ ' status: ' ~ instance.status) %}
+              {% endif %}
+              {% if instance.power_status != 'running' %}
+              {% set _ = anomalies.append('Instance ' ~ instance.label ~ ' power: ' ~ instance.power_status) %}
+              {% endif %}
+              {% if not instance.firewall_group_id %}
+              {% set _ = anomalies.append('Instance ' ~ instance.label ~ ' has NO FIREWALL') %}
+              {% endif %}
+              {% if instance.label not in known_vultr_instances %}
+              {% set _ = anomalies.append('Unknown instance: ' ~ instance.label ~ ' (' ~ instance.main_ip ~ ')') %}
+              {% endif %}
+              {% endfor %}
+              {% if anomalies %}
+              ⚠ ANOMALIES DETECTED:
+              {% for anomaly in anomalies %}
+              - {{ anomaly }}
+              {% endfor %}
+              {% else %}
+              ✓ No anomalies detected
+              {% endif %}
+          when: vultr_instances.status == 200
+
+    # =========================================================================
+    # VULTR - Bandwidth Usage
+    # =========================================================================
+    - name: "VULTR: Get bandwidth usage"
+      tags: [vultr, bandwidth]
+      block:
+        - name: "VULTR: Fetch bandwidth for each instance"
+          ansible.builtin.uri:
+            url: "https://api.vultr.com/v2/instances/{{ item.id }}/bandwidth"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ vultr_api_key }}"
+            return_content: yes
+          register: vultr_bandwidth
+          loop: "{{ vultr_instances.json.instances | default([]) }}"
+          loop_control:
+            label: "{{ item.label }}"
+          failed_when: false
+          when: vultr_instances.status == 200
+
+        - name: "VULTR: Display bandwidth summary"
+          ansible.builtin.debug:
+            msg: |
+              === VULTR BANDWIDTH USAGE ===
+              {% for result in vultr_bandwidth.results | default([]) %}
+              {% if result.json is defined and result.json.bandwidth is defined %}
+
+              {{ result.item.label }}:
+                {% set dates = result.json.bandwidth | dict2items | sort(attribute='key', reverse=true) %}
+                {% for entry in dates[:7] %}
+                {{ entry.key }}: IN {{ (entry.value.incoming_bytes / 1024 / 1024 / 1024) | round(2) }}GB / OUT {{ (entry.value.outgoing_bytes / 1024 / 1024 / 1024) | round(2) }}GB
+                {% endfor %}
+              {% endif %}
+              {% endfor %}
+          when: vultr_bandwidth is defined
+
+    # =========================================================================
+    # VULTR - SSH Keys
+    # =========================================================================
+    - name: "VULTR: Get SSH keys"
+      tags: [vultr, ssh-keys]
+      block:
+        - name: "VULTR: Fetch SSH keys from API"
+          ansible.builtin.uri:
+            url: "https://api.vultr.com/v2/ssh-keys"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ vultr_api_key }}"
+            return_content: yes
+          register: vultr_ssh_keys
+          failed_when: false
+
+        - name: "VULTR: Display SSH keys"
+          ansible.builtin.debug:
+            msg: |
+              === VULTR SSH KEYS ===
+              {% for key in vultr_ssh_keys.json.ssh_keys | default([]) %}
+
+              Name: {{ key.name }}
+                ID: {{ key.id }}
+                Created: {{ key.date_created }}
+                Fingerprint: {{ key.ssh_key[:50] }}...
+              {% endfor %}
+
+              Total: {{ vultr_ssh_keys.json.ssh_keys | default([]) | length }} keys
+          when: vultr_ssh_keys.status == 200
+
+    # =========================================================================
+    # VULTR - Firewalls
+    # =========================================================================
+    - name: "VULTR: Get firewall groups"
+      tags: [vultr, firewall]
+      block:
+        - name: "VULTR: Fetch firewall groups"
+          ansible.builtin.uri:
+            url: "https://api.vultr.com/v2/firewalls"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ vultr_api_key }}"
+            return_content: yes
+          register: vultr_firewalls
+          failed_when: false
+
+        - name: "VULTR: Display firewall groups"
+          ansible.builtin.debug:
+            msg: |
+              === VULTR FIREWALL GROUPS ===
+              {% for fw in vultr_firewalls.json.firewall_groups | default([]) %}
+
+              {{ fw.description }}:
+                ID: {{ fw.id }}
+                Created: {{ fw.date_created }}
+                Modified: {{ fw.date_modified }}
+                Rules: {{ fw.rule_count }}
+                Instances: {{ fw.instance_count }}
+              {% endfor %}
+          when: vultr_firewalls.status == 200
+
+    # =========================================================================
+    # HETZNER - Server status
+    # =========================================================================
+    - name: "HETZNER: Get all servers"
+      tags: [hetzner, always]
+      block:
+        - name: "HETZNER: Fetch servers from API"
+          ansible.builtin.uri:
+            url: "https://api.hetzner.cloud/v1/servers"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ hetzner_api_token }}"
+            return_content: yes
+          register: hetzner_servers
+          failed_when: false
+
+        - name: "HETZNER: Display server summary"
+          ansible.builtin.debug:
+            msg: |
+              === HETZNER SERVERS ({{ hetzner_servers.json.servers | default([]) | length }} total) ===
+              {% for server in hetzner_servers.json.servers | default([]) %}
+
+              {{ server.name }}:
+                ID: {{ server.id }}
+                IP: {{ server.public_net.ipv4.ip }}
+                Status: {{ server.status }}
+                Type: {{ server.server_type.name }} ({{ server.server_type.cores }} cores, {{ server.server_type.memory }}GB RAM)
+                Location: {{ server.datacenter.location.city }}, {{ server.datacenter.location.country }}
+                Created: {{ server.created }}
+                Labels: {{ server.labels | default({}) }}
+                Traffic: IN {{ (server.ingoing_traffic / 1024 / 1024 / 1024) | round(2) }}GB / OUT {{ (server.outgoing_traffic / 1024 / 1024 / 1024) | round(2) }}GB
+                Included Traffic: {{ (server.included_traffic / 1024 / 1024 / 1024 / 1024) | round(2) }}TB
+                Protection: Delete={{ server.protection.delete }}, Rebuild={{ server.protection.rebuild }}
+                Firewalls: {{ server.public_net.firewalls | length }}
+                {% if server.name not in known_hetzner_servers %}
+                ⚠ WARNING: Unknown server - verify this is expected
+                {% endif %}
+              {% endfor %}
+          when: hetzner_servers.status == 200
+
+        - name: "HETZNER: Check for anomalies"
+          ansible.builtin.debug:
+            msg: |
+              === HETZNER ANOMALY CHECK ===
+              {% set anomalies = [] %}
+              {% for server in hetzner_servers.json.servers | default([]) %}
+              {% if server.status != 'running' %}
+              {% set _ = anomalies.append('Server ' ~ server.name ~ ' status: ' ~ server.status) %}
+              {% endif %}
+              {% if server.public_net.firewalls | length == 0 %}
+              {% set _ = anomalies.append('Server ' ~ server.name ~ ' has NO FIREWALL') %}
+              {% endif %}
+              {% if server.name not in known_hetzner_servers %}
+              {% set _ = anomalies.append('Unknown server: ' ~ server.name ~ ' (' ~ server.public_net.ipv4.ip ~ ')') %}
+              {% endif %}
+              {% endfor %}
+              {% if anomalies %}
+              ⚠ ANOMALIES DETECTED:
+              {% for anomaly in anomalies %}
+              - {{ anomaly }}
+              {% endfor %}
+              {% else %}
+              ✓ No anomalies detected
+              {% endif %}
+          when: hetzner_servers.status == 200
+
+    # =========================================================================
+    # HETZNER - SSH Keys
+    # =========================================================================
+    - name: "HETZNER: Get SSH keys"
+      tags: [hetzner, ssh-keys]
+      block:
+        - name: "HETZNER: Fetch SSH keys from API"
+          ansible.builtin.uri:
+            url: "https://api.hetzner.cloud/v1/ssh_keys"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ hetzner_api_token }}"
+            return_content: yes
+          register: hetzner_ssh_keys
+          failed_when: false
+
+        - name: "HETZNER: Display SSH keys"
+          ansible.builtin.debug:
+            msg: |
+              === HETZNER SSH KEYS ===
+              {% for key in hetzner_ssh_keys.json.ssh_keys | default([]) %}
+
+              Name: {{ key.name }}
+                ID: {{ key.id }}
+                Created: {{ key.created }}
+                Fingerprint: {{ key.fingerprint }}
+                Labels: {{ key.labels | default({}) }}
+              {% endfor %}
+
+              Total: {{ hetzner_ssh_keys.json.ssh_keys | default([]) | length }} keys
+          when: hetzner_ssh_keys.status == 200
+
+    # =========================================================================
+    # HETZNER - Firewalls
+    # =========================================================================
+    - name: "HETZNER: Get firewalls"
+      tags: [hetzner, firewall]
+      block:
+        - name: "HETZNER: Fetch firewalls from API"
+          ansible.builtin.uri:
+            url: "https://api.hetzner.cloud/v1/firewalls"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ hetzner_api_token }}"
+            return_content: yes
+          register: hetzner_firewalls
+          failed_when: false
+
+        - name: "HETZNER: Display firewalls"
+          ansible.builtin.debug:
+            msg: |
+              === HETZNER FIREWALLS ===
+              {% for fw in hetzner_firewalls.json.firewalls | default([]) %}
+
+              {{ fw.name }}:
+                ID: {{ fw.id }}
+                Created: {{ fw.created }}
+                Rules: {{ fw.rules | length }}
+                Applied to: {{ fw.applied_to | length }} resources
+                Labels: {{ fw.labels | default({}) }}
+              {% endfor %}
+          when: hetzner_firewalls.status == 200
+
+    # =========================================================================
+    # HETZNER - Volumes
+    # =========================================================================
+    - name: "HETZNER: Get volumes"
+      tags: [hetzner, volumes]
+      block:
+        - name: "HETZNER: Fetch volumes from API"
+          ansible.builtin.uri:
+            url: "https://api.hetzner.cloud/v1/volumes"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ hetzner_api_token }}"
+            return_content: yes
+          register: hetzner_volumes
+          failed_when: false
+
+        - name: "HETZNER: Display volumes"
+          ansible.builtin.debug:
+            msg: |
+              === HETZNER VOLUMES ===
+              {% for vol in hetzner_volumes.json.volumes | default([]) %}
+
+              {{ vol.name }}:
+                ID: {{ vol.id }}
+                Size: {{ vol.size }}GB
+                Server: {{ vol.server | default('unattached') }}
+                Location: {{ vol.location.name }}
+                Status: {{ vol.status }}
+                Created: {{ vol.created }}
+                Protection: {{ vol.protection.delete }}
+              {% endfor %}
+          when: hetzner_volumes.status == 200
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: "SUMMARY: Overall infrastructure status"
+      tags: [always]
+      block:
+        - name: "SUMMARY: Display overall status"
+          ansible.builtin.debug:
+            msg: |
+              ╔══════════════════════════════════════════════════════════════════╗
+              ║            CIRIS INFRASTRUCTURE STATUS SUMMARY                   ║
+              ╠══════════════════════════════════════════════════════════════════╣
+              ║                                                                  ║
+              ║  VULTR:                                                          ║
+              ║    Instances: {{ vultr_instances.json.instances | default([]) | length | string | center(3) }} ({{ vultr_instances.json.instances | default([]) | selectattr('status', 'eq', 'active') | list | length }} active)                                       ║
+              ║    API Status: {{ 'OK' if vultr_instances.status == 200 else 'FAILED' }}                                              ║
+              ║                                                                  ║
+              ║  HETZNER:                                                        ║
+              ║    Servers: {{ hetzner_servers.json.servers | default([]) | length | string | center(3) }} ({{ hetzner_servers.json.servers | default([]) | selectattr('status', 'eq', 'running') | list | length }} running)                                          ║
+              ║    API Status: {{ 'OK' if hetzner_servers.status == 200 else 'FAILED' }}                                              ║
+              ║                                                                  ║
+              ║  Timestamp: {{ ansible_date_time.iso8601 | default('N/A') }}                             ║
+              ║                                                                  ║
+              ╚══════════════════════════════════════════════════════════════════╝

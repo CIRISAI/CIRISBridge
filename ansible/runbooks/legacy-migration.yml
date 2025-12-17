@@ -1,0 +1,347 @@
+---
+# Legacy Infrastructure Migration Runbook
+# Migrates from legacy servers to CIRISBridge infrastructure
+#
+# Legacy Servers (to be retired):
+#   - llm (149.28.113.123) - Old LLM proxy serving llm.ciris.ai
+#   - billing (149.28.120.73) - Old billing serving billing.ciris.ai
+#   - cirisnode0 (108.61.119.117) - Old node (already stopped)
+#
+# New Infrastructure:
+#   - cirisbridge-us (108.61.242.236) - proxy1/billing1.ciris-services-1.ai
+#   - cirisbridge-eu (46.224.81.217) - proxy1/billing1.ciris-services-2.ai
+#
+# Usage:
+#   # Phase 1: Pre-cutover validation
+#   ansible-playbook runbooks/legacy-migration.yml --tags validate
+#
+#   # Phase 2: DNS cutover (manual - update Cloudflare)
+#   # See instructions in output
+#
+#   # Phase 3: Post-cutover monitoring
+#   ansible-playbook runbooks/legacy-migration.yml --tags monitor
+#
+#   # Phase 4: Decommission legacy servers
+#   ansible-playbook runbooks/legacy-migration.yml --tags decommission
+#
+# DNS Changes Required (Cloudflare ciris.ai zone):
+#   - llm.ciris.ai -> CNAME to proxy1.ciris-services-1.ai
+#   - billing.ciris.ai -> CNAME to billing1.ciris-services-1.ai
+#
+# Rollback: Revert DNS CNAMEs to legacy IPs
+
+- name: "LEGACY MIGRATION - Pre-cutover Validation"
+  hosts: localhost
+  gather_facts: false
+  tags: [validate, never]
+  vars:
+    legacy_servers:
+      llm:
+        ip: "149.28.113.123"
+        domain: "llm.ciris.ai"
+        health_path: "/health/liveliness"
+      billing:
+        ip: "149.28.120.73"
+        domain: "billing.ciris.ai"
+        health_path: "/health"
+    new_servers:
+      proxy_us:
+        domain: "proxy1.ciris-services-1.ai"
+        health_path: "/health"
+      proxy_eu:
+        domain: "proxy1.ciris-services-2.ai"
+        health_path: "/health"
+      billing_us:
+        domain: "billing1.ciris-services-1.ai"
+        health_path: "/health"
+      billing_eu:
+        domain: "billing1.ciris-services-2.ai"
+        health_path: "/health"
+
+  tasks:
+    - name: "=== PHASE 1: PRE-CUTOVER VALIDATION ==="
+      ansible.builtin.debug:
+        msg: "Validating both legacy and new infrastructure are healthy"
+
+    # Check legacy servers
+    - name: Check legacy LLM server health
+      ansible.builtin.uri:
+        url: "https://{{ legacy_servers.llm.ip }}{{ legacy_servers.llm.health_path }}"
+        validate_certs: false
+        status_code: [200, 401]  # 401 is expected (auth required)
+      register: legacy_llm_health
+      ignore_errors: true
+
+    - name: Check legacy billing server health
+      ansible.builtin.uri:
+        url: "https://{{ legacy_servers.billing.domain }}{{ legacy_servers.billing.health_path }}"
+        status_code: 200
+      register: legacy_billing_health
+      ignore_errors: true
+
+    # Check new infrastructure
+    - name: Check new proxy US health
+      ansible.builtin.uri:
+        url: "https://{{ new_servers.proxy_us.domain }}{{ new_servers.proxy_us.health_path }}"
+        status_code: [200, 401]
+      register: new_proxy_us_health
+      ignore_errors: true
+
+    - name: Check new proxy EU health
+      ansible.builtin.uri:
+        url: "https://{{ new_servers.proxy_eu.domain }}{{ new_servers.proxy_eu.health_path }}"
+        status_code: [200, 401]
+      register: new_proxy_eu_health
+      ignore_errors: true
+
+    - name: Check new billing US health
+      ansible.builtin.uri:
+        url: "https://{{ new_servers.billing_us.domain }}{{ new_servers.billing_us.health_path }}"
+        status_code: 200
+      register: new_billing_us_health
+      ignore_errors: true
+
+    - name: Check new billing EU health
+      ansible.builtin.uri:
+        url: "https://{{ new_servers.billing_eu.domain }}{{ new_servers.billing_eu.health_path }}"
+        status_code: 200
+      register: new_billing_eu_health
+      ignore_errors: true
+
+    # DNS checks
+    - name: Check current DNS for llm.ciris.ai
+      ansible.builtin.command: dig +short llm.ciris.ai
+      register: llm_dns
+      changed_when: false
+
+    - name: Check current DNS for billing.ciris.ai
+      ansible.builtin.command: dig +short billing.ciris.ai
+      register: billing_dns
+      changed_when: false
+
+    - name: Display validation results
+      ansible.builtin.debug:
+        msg: |
+          === PRE-CUTOVER VALIDATION RESULTS ===
+
+          LEGACY INFRASTRUCTURE:
+            llm.ciris.ai (149.28.113.123):
+              Health: {{ 'OK' if legacy_llm_health.status is defined else 'FAILED' }}
+              DNS resolves to: {{ llm_dns.stdout_lines | join(', ') }}
+
+            billing.ciris.ai (149.28.120.73):
+              Health: {{ 'OK' if legacy_billing_health.status == 200 else 'FAILED' }}
+              DNS resolves to: {{ billing_dns.stdout_lines | join(', ') }}
+
+          NEW INFRASTRUCTURE:
+            proxy1.ciris-services-1.ai (US):
+              Health: {{ 'OK' if new_proxy_us_health.status is defined else 'FAILED' }}
+
+            proxy1.ciris-services-2.ai (EU):
+              Health: {{ 'OK' if new_proxy_eu_health.status is defined else 'FAILED' }}
+
+            billing1.ciris-services-1.ai (US):
+              Health: {{ 'OK' if new_billing_us_health.status == 200 else 'FAILED' }}
+              Response: {{ new_billing_us_health.json | default('N/A') }}
+
+            billing1.ciris-services-2.ai (EU):
+              Health: {{ 'OK' if new_billing_eu_health.status == 200 else 'FAILED' }}
+
+          === DNS CUTOVER INSTRUCTIONS ===
+
+          When ready, update Cloudflare DNS for ciris.ai zone:
+
+          1. llm.ciris.ai
+             Current: A record pointing to 149.28.113.123 (via Cloudflare proxy)
+             Change to: CNAME -> proxy1.ciris-services-1.ai
+             TTL: 300 (5 min) initially, increase after validation
+
+          2. billing.ciris.ai
+             Current: A record pointing to 149.28.120.73 (via Cloudflare proxy)
+             Change to: CNAME -> billing1.ciris-services-1.ai
+             TTL: 300 (5 min) initially, increase after validation
+
+          After DNS changes propagate (5-10 min), run:
+            ansible-playbook runbooks/legacy-migration.yml --tags monitor
+
+- name: "LEGACY MIGRATION - Post-cutover Monitoring"
+  hosts: localhost
+  gather_facts: false
+  tags: [monitor, never]
+  vars:
+    check_interval: 60
+    check_count: 10
+
+  tasks:
+    - name: "=== PHASE 3: POST-CUTOVER MONITORING ==="
+      ansible.builtin.debug:
+        msg: "Monitoring traffic shift from legacy to new infrastructure"
+
+    - name: Verify llm.ciris.ai now resolves to new infrastructure
+      ansible.builtin.command: dig +short llm.ciris.ai
+      register: llm_dns_post
+      changed_when: false
+
+    - name: Verify billing.ciris.ai now resolves to new infrastructure
+      ansible.builtin.command: dig +short billing.ciris.ai
+      register: billing_dns_post
+      changed_when: false
+
+    - name: Test llm.ciris.ai through new infrastructure
+      ansible.builtin.uri:
+        url: "https://llm.ciris.ai/health"
+        status_code: [200, 401]
+      register: llm_test
+      ignore_errors: true
+
+    - name: Test billing.ciris.ai through new infrastructure
+      ansible.builtin.uri:
+        url: "https://billing.ciris.ai/health"
+        status_code: 200
+      register: billing_test
+      ignore_errors: true
+
+    - name: Display post-cutover status
+      ansible.builtin.debug:
+        msg: |
+          === POST-CUTOVER STATUS ===
+
+          DNS RESOLUTION:
+            llm.ciris.ai: {{ llm_dns_post.stdout_lines | join(', ') }}
+            billing.ciris.ai: {{ billing_dns_post.stdout_lines | join(', ') }}
+
+          ENDPOINT TESTS:
+            llm.ciris.ai/health: {{ llm_test.status | default('FAILED') }}
+            billing.ciris.ai/health: {{ billing_test.status | default('FAILED') }}
+            {% if billing_test.json is defined %}
+            billing response: {{ billing_test.json }}
+            {% endif %}
+
+          === MONITORING CHECKLIST ===
+
+          [ ] DNS propagation complete (check from multiple locations)
+          [ ] llm.ciris.ai returns expected responses
+          [ ] billing.ciris.ai returns expected responses
+          [ ] No 5xx errors in new infrastructure logs
+          [ ] Legacy server traffic dropping to zero
+
+          Monitor legacy server traffic via Vultr API:
+            curl -H "Authorization: Bearer $VULTR_API_KEY" \
+              "https://api.vultr.com/v2/instances/fed95dff-d7fe-4d1c-9291-29b5e0884e28/bandwidth"
+
+          When legacy traffic is zero for 24-48 hours, run:
+            ansible-playbook runbooks/legacy-migration.yml --tags decommission
+
+- name: "LEGACY MIGRATION - Decommission Legacy Servers"
+  hosts: localhost
+  gather_facts: false
+  tags: [decommission, never]
+  vars:
+    vultr_api_key: "{{ lookup('env', 'VULTR_API_KEY') }}"
+    legacy_instances:
+      - id: "fed95dff-d7fe-4d1c-9291-29b5e0884e28"
+        label: "llm"
+        ip: "149.28.113.123"
+      - id: "0d8a8c69-1f91-4fbf-9700-21db60128d44"
+        label: "billing"
+        ip: "149.28.120.73"
+      - id: "47c2431c-da99-4634-b751-ab5708098ff8"
+        label: "cirisnode0"
+        ip: "108.61.119.117"
+
+  tasks:
+    - name: "=== PHASE 4: DECOMMISSION LEGACY SERVERS ==="
+      ansible.builtin.debug:
+        msg: |
+          WARNING: This will permanently delete legacy servers!
+
+          Servers to be deleted:
+          {% for instance in legacy_instances %}
+            - {{ instance.label }} ({{ instance.ip }}) - {{ instance.id }}
+          {% endfor %}
+
+          Ensure you have:
+          [ ] Verified all traffic moved to new infrastructure
+          [ ] Backed up any needed data from legacy servers
+          [ ] Confirmed DNS cutover complete for 24-48 hours
+
+    - name: Confirm decommission
+      ansible.builtin.pause:
+        prompt: |
+          Type 'DELETE LEGACY SERVERS' to proceed with decommission
+          (Ctrl+C to abort)
+      register: confirm_delete
+
+    - name: Abort if not confirmed
+      ansible.builtin.fail:
+        msg: "Decommission aborted - confirmation text did not match"
+      when: confirm_delete.user_input != 'DELETE LEGACY SERVERS'
+
+    - name: Check VULTR_API_KEY is set
+      ansible.builtin.fail:
+        msg: "VULTR_API_KEY environment variable must be set"
+      when: vultr_api_key == ""
+
+    # Stop instances first (safer than immediate delete)
+    - name: Stop legacy instances
+      ansible.builtin.uri:
+        url: "https://api.vultr.com/v2/instances/{{ item.id }}/halt"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ vultr_api_key }}"
+        status_code: [204, 400]  # 400 if already stopped
+      loop: "{{ legacy_instances }}"
+      loop_control:
+        label: "{{ item.label }}"
+
+    - name: Wait for instances to stop
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Final confirmation before delete
+      ansible.builtin.pause:
+        prompt: |
+          Instances have been STOPPED. They can still be restarted.
+
+          To PERMANENTLY DELETE, type 'CONFIRM DELETE'
+          (Ctrl+C to abort - instances will remain stopped)
+      register: final_confirm
+
+    - name: Skip delete if not confirmed
+      ansible.builtin.debug:
+        msg: "Instances stopped but not deleted. Run again with --tags decommission to complete."
+      when: final_confirm.user_input != 'CONFIRM DELETE'
+
+    - name: Delete legacy instances
+      ansible.builtin.uri:
+        url: "https://api.vultr.com/v2/instances/{{ item.id }}"
+        method: DELETE
+        headers:
+          Authorization: "Bearer {{ vultr_api_key }}"
+        status_code: [204, 404]  # 404 if already deleted
+      loop: "{{ legacy_instances }}"
+      loop_control:
+        label: "{{ item.label }}"
+      when: final_confirm.user_input == 'CONFIRM DELETE'
+
+    - name: Decommission complete
+      ansible.builtin.debug:
+        msg: |
+          === DECOMMISSION COMPLETE ===
+
+          The following servers have been {{ 'DELETED' if final_confirm.user_input == 'CONFIRM DELETE' else 'STOPPED' }}:
+          {% for instance in legacy_instances %}
+            - {{ instance.label }} ({{ instance.ip }})
+          {% endfor %}
+
+          {% if final_confirm.user_input == 'CONFIRM DELETE' %}
+          Monthly savings: ~$30/month (estimated)
+
+          Remember to:
+          [ ] Remove legacy entries from any monitoring
+          [ ] Update documentation
+          [ ] Archive any relevant configs/logs
+          {% else %}
+          Instances are stopped but not deleted.
+          Run with --tags decommission again to complete deletion.
+          {% endif %}
