@@ -80,3 +80,13 @@ all:
     # INSERT INTO cirislens.service_tokens (service_name, token_hash, description)
     # VALUES ('ciris-scheduler', encode(sha256('YOUR_TOKEN'::bytea), 'hex'), 'Scheduler heartbeat');
     scheduler_service_token: "CHANGE_ME"  # Service token for CIRISLens API
+
+    # Scout Operations (runbooks/scout-ops.yml)
+    # These are used for Scout agent database troubleshooting
+    scout_host: "1.2.3.4"  # Scout VM IP with SSH access to managed Postgres
+    scout_ssh_key: "~/.ssh/scout_key"  # Path to SSH key for scout access
+    scout_db_host: "your-managed-postgres.example.com"  # Managed Postgres hostname
+    scout_db_port: 5432  # Managed Postgres port
+    scout_db_user: "ciris_user"  # Database username
+    scout_db_name: "ciris_db"  # Database name
+    scout_db_password: "CHANGE_ME"  # Database password

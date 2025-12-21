@@ -1,0 +1,272 @@
+---
+# Scout Operations Runbook
+# Database queries for Scout agent troubleshooting (managed Postgres in research VPC)
+#
+# Prerequisites:
+#   - inventory/production.yml must define scout_* variables (see inventory/production.yml.example)
+#   - SSH key for scout access
+#
+# Usage:
+#   # Check for stuck thoughts (pending/processing older than 30 min)
+#   ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stuck
+#
+#   # Check for stuck thoughts with custom threshold (in minutes)
+#   ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stuck -e "stuck_threshold_minutes=60"
+#
+#   # Cancel stuck thoughts (requires confirm=yes)
+#   ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags cancel-stuck -e "confirm=yes"
+#
+#   # Get thought statistics by status
+#   ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stats
+#
+#   # Get thought statistics by occurrence
+#   ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stats-by-occurrence
+#
+#   # List recent thoughts
+#   ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags recent -e "limit=20"
+#
+#   # Check task queue status
+#   ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags tasks
+
+- name: "SCOUT OPS - Check Stuck Thoughts and Tasks"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [stuck]
+  vars:
+    stuck_threshold_minutes: 30
+    # These come from inventory/production.yml
+    # scout_host: Scout VM IP with SSH access to managed Postgres
+    # scout_ssh_key: Path to SSH key for scout access
+    # scout_db_host: Managed Postgres hostname
+    # scout_db_port: Managed Postgres port
+    # scout_db_user: Database username
+    # scout_db_name: Database name
+    # scout_db_password: Database password
+
+  tasks:
+    - name: "STUCK: Validate required variables"
+      ansible.builtin.fail:
+        msg: "Missing required variable: {{ item }}. Ensure inventory/production.yml is configured."
+      when: vars[item] is not defined
+      loop:
+        - scout_host
+        - scout_ssh_key
+        - scout_db_host
+        - scout_db_port
+        - scout_db_user
+        - scout_db_name
+        - scout_db_password
+
+    - name: "STUCK: Find pending thoughts older than threshold"
+      ansible.builtin.shell: |
+        ssh -i {{ scout_ssh_key }} -o StrictHostKeyChecking=no root@{{ scout_host }} \
+          'docker run --rm -e PGPASSWORD="{{ scout_db_password }}" postgres:15-alpine \
+            psql -h {{ scout_db_host }} -p {{ scout_db_port }} -U {{ scout_db_user }} -d {{ scout_db_name }} -c "
+              SELECT thought_id, status, agent_occurrence_id, created_at, updated_at,
+                     EXTRACT(EPOCH FROM (NOW() - updated_at))/60 AS minutes_stuck
+              FROM thoughts
+              WHERE status IN ('"'"'pending'"'"', '"'"'processing'"'"')
+                AND updated_at < NOW() - INTERVAL '"'"'{{ stuck_threshold_minutes }} minutes'"'"'
+              ORDER BY updated_at ASC;"'
+      register: stuck_pending
+
+    - name: "STUCK: Count by status and occurrence"
+      ansible.builtin.shell: |
+        ssh -i {{ scout_ssh_key }} -o StrictHostKeyChecking=no root@{{ scout_host }} \
+          'docker run --rm -e PGPASSWORD="{{ scout_db_password }}" postgres:15-alpine \
+            psql -h {{ scout_db_host }} -p {{ scout_db_port }} -U {{ scout_db_user }} -d {{ scout_db_name }} -c "
+              SELECT status, agent_occurrence_id, COUNT(*) as count,
+                     MIN(updated_at) as oldest, MAX(updated_at) as newest
+              FROM thoughts
+              WHERE status IN ('"'"'pending'"'"', '"'"'processing'"'"')
+                AND updated_at < NOW() - INTERVAL '"'"'{{ stuck_threshold_minutes }} minutes'"'"'
+              GROUP BY status, agent_occurrence_id ORDER BY count DESC;"'
+      register: stuck_summary
+
+    - name: "STUCK: Find active tasks older than threshold"
+      ansible.builtin.shell: |
+        ssh -i {{ scout_ssh_key }} -o StrictHostKeyChecking=no root@{{ scout_host }} \
+          'docker run --rm -e PGPASSWORD="{{ scout_db_password }}" postgres:15-alpine \
+            psql -h {{ scout_db_host }} -p {{ scout_db_port }} -U {{ scout_db_user }} -d {{ scout_db_name }} -c "
+              SELECT task_id, status, channel_id, created_at, updated_at,
+                     EXTRACT(EPOCH FROM (NOW() - updated_at))/60 AS minutes_stuck
+              FROM tasks
+              WHERE status = '"'"'active'"'"'
+                AND updated_at < NOW() - INTERVAL '"'"'{{ stuck_threshold_minutes }} minutes'"'"'
+              ORDER BY updated_at ASC;"'
+      register: stuck_tasks
+
+    - name: "STUCK: Display results"
+      ansible.builtin.debug:
+        msg: |
+          === Stuck Thoughts (older than {{ stuck_threshold_minutes }} min) ===
+          {{ stuck_pending.stdout }}
+
+          === Summary by Status/Occurrence ===
+          {{ stuck_summary.stdout }}
+
+          === Stuck Active Tasks (older than {{ stuck_threshold_minutes }} min) ===
+          {{ stuck_tasks.stdout }}
+
+          To cancel stuck thoughts/tasks, run:
+          ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags cancel-stuck -e "confirm=yes"
+
+- name: "SCOUT OPS - Cancel Stuck Thoughts and Tasks"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [cancel-stuck, never]
+  vars:
+    stuck_threshold_minutes: 30
+    confirm: "no"
+
+  tasks:
+    - name: "CANCEL: Require confirmation"
+      ansible.builtin.fail:
+        msg: "This will cancel stuck thoughts. Add -e 'confirm=yes' to proceed."
+      when: confirm != "yes"
+
+    - name: "CANCEL: Update stuck thoughts to cancelled"
+      ansible.builtin.shell: |
+        ssh -i {{ scout_ssh_key }} -o StrictHostKeyChecking=no root@{{ scout_host }} \
+          'docker run --rm -e PGPASSWORD="{{ scout_db_password }}" postgres:15-alpine \
+            psql -h {{ scout_db_host }} -p {{ scout_db_port }} -U {{ scout_db_user }} -d {{ scout_db_name }} -c "
+              UPDATE thoughts SET status = '"'"'cancelled'"'"', updated_at = NOW()
+              WHERE status IN ('"'"'pending'"'"', '"'"'processing'"'"')
+                AND updated_at < NOW() - INTERVAL '"'"'{{ stuck_threshold_minutes }} minutes'"'"'
+              RETURNING thought_id, agent_occurrence_id, created_at;"'
+      register: cancel_thoughts_result
+
+    - name: "CANCEL: Update stuck active tasks to failed"
+      ansible.builtin.shell: |
+        ssh -i {{ scout_ssh_key }} -o StrictHostKeyChecking=no root@{{ scout_host }} \
+          'docker run --rm -e PGPASSWORD="{{ scout_db_password }}" postgres:15-alpine \
+            psql -h {{ scout_db_host }} -p {{ scout_db_port }} -U {{ scout_db_user }} -d {{ scout_db_name }} -c "
+              UPDATE tasks SET status = '"'"'failed'"'"', updated_at = NOW()
+              WHERE status = '"'"'active'"'"'
+                AND updated_at < NOW() - INTERVAL '"'"'{{ stuck_threshold_minutes }} minutes'"'"'
+              RETURNING task_id, channel_id, created_at;"'
+      register: cancel_tasks_result
+
+    - name: "CANCEL: Display results"
+      ansible.builtin.debug:
+        msg: |
+          === Cancelled Thoughts ===
+          {{ cancel_thoughts_result.stdout }}
+
+          === Failed Tasks ===
+          {{ cancel_tasks_result.stdout }}
+
+- name: "SCOUT OPS - Thought Statistics"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [stats, never]
+
+  tasks:
+    - name: "STATS: Get thought counts by status"
+      ansible.builtin.shell: |
+        ssh -i {{ scout_ssh_key }} -o StrictHostKeyChecking=no root@{{ scout_host }} \
+          'docker run --rm -e PGPASSWORD="{{ scout_db_password }}" postgres:15-alpine \
+            psql -h {{ scout_db_host }} -p {{ scout_db_port }} -U {{ scout_db_user }} -d {{ scout_db_name }} -c "
+              SELECT status, COUNT(*) as count, MIN(created_at) as oldest, MAX(created_at) as newest
+              FROM thoughts GROUP BY status ORDER BY count DESC;"'
+      register: status_stats
+
+    - name: "STATS: Get task counts by status"
+      ansible.builtin.shell: |
+        ssh -i {{ scout_ssh_key }} -o StrictHostKeyChecking=no root@{{ scout_host }} \
+          'docker run --rm -e PGPASSWORD="{{ scout_db_password }}" postgres:15-alpine \
+            psql -h {{ scout_db_host }} -p {{ scout_db_port }} -U {{ scout_db_user }} -d {{ scout_db_name }} -c "
+              SELECT status, COUNT(*) as count FROM tasks GROUP BY status ORDER BY count DESC;"'
+      register: task_stats
+
+    - name: "STATS: Display results"
+      ansible.builtin.debug:
+        msg: |
+          === Thought Statistics ===
+          {{ status_stats.stdout }}
+
+          === Task Statistics ===
+          {{ task_stats.stdout }}
+
+- name: "SCOUT OPS - Statistics by Occurrence"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [stats-by-occurrence, never]
+
+  tasks:
+    - name: "OCCURRENCE: Get thought counts by occurrence and status"
+      ansible.builtin.shell: |
+        ssh -i {{ scout_ssh_key }} -o StrictHostKeyChecking=no root@{{ scout_host }} \
+          'docker run --rm -e PGPASSWORD="{{ scout_db_password }}" postgres:15-alpine \
+            psql -h {{ scout_db_host }} -p {{ scout_db_port }} -U {{ scout_db_user }} -d {{ scout_db_name }} -c "
+              SELECT agent_occurrence_id, status, COUNT(*) as count, MAX(updated_at) as last_activity
+              FROM thoughts GROUP BY agent_occurrence_id, status
+              ORDER BY agent_occurrence_id, count DESC;"'
+      register: occurrence_stats
+
+    - name: "OCCURRENCE: Display results"
+      ansible.builtin.debug:
+        msg: |
+          === Thoughts by Occurrence ===
+          {{ occurrence_stats.stdout }}
+
+- name: "SCOUT OPS - Recent Thoughts"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [recent, never]
+  vars:
+    limit: 20
+
+  tasks:
+    - name: "RECENT: Get recent thoughts"
+      ansible.builtin.shell: |
+        ssh -i {{ scout_ssh_key }} -o StrictHostKeyChecking=no root@{{ scout_host }} \
+          'docker run --rm -e PGPASSWORD="{{ scout_db_password }}" postgres:15-alpine \
+            psql -h {{ scout_db_host }} -p {{ scout_db_port }} -U {{ scout_db_user }} -d {{ scout_db_name }} -c "
+              SELECT thought_id, status, agent_occurrence_id, thought_type, created_at, updated_at
+              FROM thoughts ORDER BY created_at DESC LIMIT {{ limit }};"'
+      register: recent_thoughts
+
+    - name: "RECENT: Display results"
+      ansible.builtin.debug:
+        msg: "{{ recent_thoughts.stdout }}"
+
+- name: "SCOUT OPS - Task Queue Status"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [tasks, never]
+
+  tasks:
+    - name: "TASKS: Get pending/active tasks"
+      ansible.builtin.shell: |
+        ssh -i {{ scout_ssh_key }} -o StrictHostKeyChecking=no root@{{ scout_host }} \
+          'docker run --rm -e PGPASSWORD="{{ scout_db_password }}" postgres:15-alpine \
+            psql -h {{ scout_db_host }} -p {{ scout_db_port }} -U {{ scout_db_user }} -d {{ scout_db_name }} -c "
+              SELECT task_id, status, channel_id, created_at, updated_at
+              FROM tasks WHERE status IN ('"'"'pending'"'"', '"'"'active'"'"')
+              ORDER BY created_at DESC LIMIT 20;"'
+      register: pending_tasks
+
+    - name: "TASKS: Get task statistics"
+      ansible.builtin.shell: |
+        ssh -i {{ scout_ssh_key }} -o StrictHostKeyChecking=no root@{{ scout_host }} \
+          'docker run --rm -e PGPASSWORD="{{ scout_db_password }}" postgres:15-alpine \
+            psql -h {{ scout_db_host }} -p {{ scout_db_port }} -U {{ scout_db_user }} -d {{ scout_db_name }} -c "
+              SELECT status, COUNT(*) as count, MAX(updated_at) as last_activity
+              FROM tasks GROUP BY status ORDER BY count DESC;"'
+      register: task_summary
+
+    - name: "TASKS: Display results"
+      ansible.builtin.debug:
+        msg: |
+          === Pending/Active Tasks ===
+          {{ pending_tasks.stdout }}
+
+          === Task Summary ===
+          {{ task_summary.stdout }}

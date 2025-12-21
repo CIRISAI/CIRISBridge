@@ -237,6 +237,7 @@ Operational runbooks for incident response and infrastructure management are in 
 |---------|---------|
 | `billing-rollback.yml` | Rollback billing to previous version |
 | `legacy-migration.yml` | Migrate from legacy servers to CIRISBridge |
+| `scout-ops.yml` | Scout agent database queries (stuck thoughts, stats) |
 
 ### Common Runbook Commands
 
@@ -285,6 +286,12 @@ ansible-playbook -i inventory/production.yml runbooks/billing-rollback.yml -e "r
 ansible-playbook runbooks/legacy-migration.yml --tags validate      # Pre-cutover validation
 ansible-playbook runbooks/legacy-migration.yml --tags monitor       # Post-cutover monitoring
 VULTR_API_KEY=xxx ansible-playbook runbooks/legacy-migration.yml --tags decommission  # Delete legacy servers
+
+# Scout Operations (managed Postgres)
+ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stuck                    # Check stuck thoughts
+ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags cancel-stuck -e "confirm=yes"  # Cancel stuck
+ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stats                    # Thought/task statistics
+ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stats-by-occurrence      # Stats by agent occurrence
 ```
 
 ### Severity Levels
