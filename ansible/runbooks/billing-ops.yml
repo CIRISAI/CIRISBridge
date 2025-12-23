@@ -4,23 +4,83 @@
 # Reference: https://docs.ansible.com/ansible/2.8/user_guide/playbooks_best_practices.html
 #
 # Usage:
+#   # Quick status check (24h stats, new users)
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags status --vault-password-file ~/.vault_pass
+#
 #   # Look up user by external ID (Google ID)
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup -e "external_id=10942"
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup -e "external_id=10942" --vault-password-file ~/.vault_pass
 #
 #   # Look up user by email
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup -e "email=user@example.com"
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup -e "email=user@example.com" --vault-password-file ~/.vault_pass
 #
 #   # Get user's usage history
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags usage -e "external_id=10942"
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags usage -e "external_id=10942" --vault-password-file ~/.vault_pass
 #
 #   # Get user's tool credits
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags tools -e "external_id=10942"
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags tools -e "external_id=10942" --vault-password-file ~/.vault_pass
 #
 #   # List recent transactions
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags transactions -e "limit=20"
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags transactions -e "limit=20" --vault-password-file ~/.vault_pass
 #
-#   # Get system stats
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags stats
+#   # Get system stats (full)
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags stats --vault-password-file ~/.vault_pass
+
+- name: "BILLING OPS - Quick Status"
+  hosts: all
+  gather_facts: false
+  tags: [status]
+
+  tasks:
+    - name: "STATUS: Get 24h usage stats"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            COUNT(*) as requests_24h,
+            COUNT(DISTINCT account_id) as unique_users_24h
+          FROM llm_usage_logs
+          WHERE created_at > NOW() - INTERVAL '24 hours';
+        "
+      register: usage_24h
+      ignore_errors: yes
+
+    - name: "STATUS: Get new users (last 24h)"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            external_id,
+            customer_email,
+            display_name,
+            created_at
+          FROM accounts
+          WHERE created_at > NOW() - INTERVAL '24 hours'
+          ORDER BY created_at DESC;
+        "
+      register: new_users
+      ignore_errors: yes
+
+    - name: "STATUS: Get account totals"
+      ansible.builtin.shell: |
+        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+          SELECT
+            COUNT(*) as total_accounts,
+            COUNT(*) FILTER (WHERE status = 'active') as active_accounts,
+            COUNT(*) FILTER (WHERE total_uses > 0) as accounts_with_usage
+          FROM accounts;
+        "
+      register: account_totals
+      ignore_errors: yes
+
+    - name: "STATUS: Display results"
+      ansible.builtin.debug:
+        msg: |
+          === {{ inventory_hostname | upper }} - 24h Status ===
+          {{ usage_24h.stdout | default('No usage data') }}
+
+          === New Users (24h) ===
+          {{ new_users.stdout | default('No new users') }}
+
+          === Account Totals ===
+          {{ account_totals.stdout | default('No account data') }}
 
 - name: "BILLING OPS - User Lookup"
   hosts: vultr
