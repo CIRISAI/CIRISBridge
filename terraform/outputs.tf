@@ -268,62 +268,29 @@ output "ssh_test_scout" {
 
 output "test_dns_records" {
   description = "DNS records to add to Cloudflare for test environment"
-  value = var.create_test_env ? <<-EOT
-    Add these A records to Cloudflare for ${var.primary_domain}:
-
-    lens-test     -> ${vultr_instance.test_infra[0].main_ip}
-    billing-test  -> ${vultr_instance.test_services[0].main_ip}
-    proxy-test    -> ${vultr_instance.test_services[0].main_ip}
-    scout-test    -> ${vultr_instance.test_scout[0].main_ip}
-  EOT : null
+  value = var.create_test_env ? join("\n", [
+    "Add these A records to Cloudflare for ${var.primary_domain}:",
+    "",
+    "  lens-test     -> ${vultr_instance.test_infra[0].main_ip}",
+    "  billing-test  -> ${vultr_instance.test_services[0].main_ip}",
+    "  proxy-test    -> ${vultr_instance.test_services[0].main_ip}",
+    "  scout-test    -> ${vultr_instance.test_scout[0].main_ip}",
+  ]) : null
 }
 
-output "test_ansible_inventory" {
-  description = "Ansible inventory for test environment"
-  value = var.create_test_env ? <<-EOT
-    # Test Environment Inventory
-    # Save to: ansible/inventory/test.yml
-    all:
-      children:
-        test_infra:
-          hosts:
-            test-infra:
-              ansible_host: ${vultr_instance.test_infra[0].main_ip}
-              internal_ip: ${vultr_instance.test_infra[0].internal_ip}
-
-        test_services:
-          hosts:
-            test-services:
-              ansible_host: ${vultr_instance.test_services[0].main_ip}
-              internal_ip: ${vultr_instance.test_services[0].internal_ip}
-              infra_ip: ${vultr_instance.test_infra[0].internal_ip}
-
-        test_scout:
-          hosts:
-            test-scout:
-              ansible_host: ${vultr_instance.test_scout[0].main_ip}
-              internal_ip: ${vultr_instance.test_scout[0].internal_ip}
-              services_ip: ${vultr_instance.test_services[0].internal_ip}
-
-      vars:
-        ansible_user: root
-        primary_domain: ${var.primary_domain}
-        environment: test
-        postgres_standalone: true
-  EOT : null
+output "test_ansible_inventory_snippet" {
+  description = "Key IPs for test inventory (update ansible/inventory/test.yml manually)"
+  value = var.create_test_env ? {
+    test_infra_ip     = vultr_instance.test_infra[0].main_ip
+    test_infra_vpc    = vultr_instance.test_infra[0].internal_ip
+    test_services_ip  = vultr_instance.test_services[0].main_ip
+    test_services_vpc = vultr_instance.test_services[0].internal_ip
+    test_scout_ip     = vultr_instance.test_scout[0].main_ip
+    test_scout_vpc    = vultr_instance.test_scout[0].internal_ip
+  } : null
 }
 
 output "test_cost_estimate" {
   description = "Test environment monthly cost"
-  value = var.create_test_env ? <<-EOT
-    Test Environment (Full Stack)
-    =============================
-    test-infra (vc2-1c-2gb):    ~$12.00/month  (PostgreSQL + Lens)
-    test-services (vc2-2c-4gb): ~$24.00/month  (Billing + Proxy)
-    test-scout (vc2-1c-1gb):    ~$6.00/month   (Manager + Agent)
-    VPC:                        Free
-    ----------------------------------------
-    Total when running:         ~$42.00/month
-    Total when destroyed:       $0.00/month
-  EOT : null
+  value = var.create_test_env ? "~$42/month when running (infra:$12 + services:$24 + scout:$6), $0 when destroyed" : null
 }
