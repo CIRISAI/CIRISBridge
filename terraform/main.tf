@@ -264,12 +264,12 @@ resource "hcloud_firewall_attachment" "postgres_eu" {
 # =============================================================================
 
 # Test VPC - isolated network for all test services
-resource "vultr_vpc2" "test" {
+resource "vultr_vpc" "test" {
   count          = var.create_test_env ? 1 : 0
   description    = "CIRIS Test Environment VPC"
   region         = var.vultr_region
-  ip_block       = "10.0.0.0"
-  prefix_length  = 24
+  v4_subnet      = "10.0.0.0"
+  v4_subnet_mask = 24
 }
 
 # Test Firewall - SSH from admin, HTTP/HTTPS public
@@ -337,7 +337,7 @@ resource "vultr_instance" "test_infra" {
   activation_email  = false
   ssh_key_ids       = [vultr_ssh_key.cirisbridge.id]
   firewall_group_id = vultr_firewall_group.test[0].id
-  vpc2_ids          = [vultr_vpc2.test[0].id]
+  vpc_ids           = [vultr_vpc.test[0].id]
 
   tags = ["cirisbridge", "test", "infra"]
 }
@@ -356,7 +356,7 @@ resource "vultr_instance" "test_services" {
   activation_email  = false
   ssh_key_ids       = [vultr_ssh_key.cirisbridge.id]
   firewall_group_id = vultr_firewall_group.test[0].id
-  vpc2_ids          = [vultr_vpc2.test[0].id]
+  vpc_ids           = [vultr_vpc.test[0].id]
 
   tags = ["cirisbridge", "test", "services"]
 }
@@ -375,7 +375,7 @@ resource "vultr_instance" "test_scout" {
   activation_email  = false
   ssh_key_ids       = [vultr_ssh_key.cirisbridge.id]
   firewall_group_id = vultr_firewall_group.test[0].id
-  vpc2_ids          = [vultr_vpc2.test[0].id]
+  vpc_ids           = [vultr_vpc.test[0].id]
 
   tags = ["cirisbridge", "test", "scout"]
 }
