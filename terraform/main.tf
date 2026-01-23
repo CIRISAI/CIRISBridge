@@ -257,3 +257,125 @@ resource "hcloud_firewall_attachment" "postgres_eu" {
   firewall_id = hcloud_firewall.postgres_from_us.id
   server_ids  = [hcloud_server.eu.id]
 }
+
+# =============================================================================
+# Test Environment (Optional - enabled via create_test_env variable)
+# Full stack: postgres+lens, billing+proxy, manager+scout
+# =============================================================================
+
+# Test VPC - isolated network for all test services
+resource "vultr_vpc2" "test" {
+  count          = var.create_test_env ? 1 : 0
+  description    = "CIRIS Test Environment VPC"
+  region         = var.vultr_region
+  ip_block       = "10.0.0.0"
+  prefix_length  = 24
+}
+
+# Test Firewall - SSH from admin, HTTP/HTTPS public
+resource "vultr_firewall_group" "test" {
+  count       = var.create_test_env ? 1 : 0
+  description = "CIRIS Test Environment Firewall"
+}
+
+resource "vultr_firewall_rule" "test_ssh" {
+  count             = var.create_test_env ? 1 : 0
+  firewall_group_id = vultr_firewall_group.test[0].id
+  protocol          = "tcp"
+  ip_type           = "v4"
+  subnet            = var.admin_ip
+  subnet_size       = 32
+  port              = "22"
+  notes             = "SSH from admin"
+}
+
+resource "vultr_firewall_rule" "test_https" {
+  count             = var.create_test_env ? 1 : 0
+  firewall_group_id = vultr_firewall_group.test[0].id
+  protocol          = "tcp"
+  ip_type           = "v4"
+  subnet            = "0.0.0.0"
+  subnet_size       = 0
+  port              = "443"
+  notes             = "HTTPS"
+}
+
+resource "vultr_firewall_rule" "test_http" {
+  count             = var.create_test_env ? 1 : 0
+  firewall_group_id = vultr_firewall_group.test[0].id
+  protocol          = "tcp"
+  ip_type           = "v4"
+  subnet            = "0.0.0.0"
+  subnet_size       = 0
+  port              = "80"
+  notes             = "HTTP (for ACME challenges)"
+}
+
+# Allow PostgreSQL access within VPC (for test-services -> test-infra)
+resource "vultr_firewall_rule" "test_postgres_vpc" {
+  count             = var.create_test_env ? 1 : 0
+  firewall_group_id = vultr_firewall_group.test[0].id
+  protocol          = "tcp"
+  ip_type           = "v4"
+  subnet            = "10.0.0.0"
+  subnet_size       = 24
+  port              = "5432"
+  notes             = "PostgreSQL within test VPC"
+}
+
+# Test Instance 1: Infrastructure (PostgreSQL + CIRISLens)
+resource "vultr_instance" "test_infra" {
+  count             = var.create_test_env ? 1 : 0
+  plan              = "vc2-1c-2gb"  # 1 vCPU, 2GB RAM ~$12/mo
+  region            = var.vultr_region
+  os_id             = data.vultr_os.ubuntu.id
+  label             = "ciris-test-infra"
+  hostname          = "ciris-test-infra"
+  enable_ipv6       = true
+  backups           = "disabled"
+  ddos_protection   = false
+  activation_email  = false
+  ssh_key_ids       = [vultr_ssh_key.cirisbridge.id]
+  firewall_group_id = vultr_firewall_group.test[0].id
+  vpc2_ids          = [vultr_vpc2.test[0].id]
+
+  tags = ["cirisbridge", "test", "infra"]
+}
+
+# Test Instance 2: Services (CIRISBilling + CIRISProxy)
+resource "vultr_instance" "test_services" {
+  count             = var.create_test_env ? 1 : 0
+  plan              = "vc2-2c-4gb"  # 2 vCPU, 4GB RAM ~$24/mo
+  region            = var.vultr_region
+  os_id             = data.vultr_os.ubuntu.id
+  label             = "ciris-test-services"
+  hostname          = "ciris-test-services"
+  enable_ipv6       = true
+  backups           = "disabled"
+  ddos_protection   = false
+  activation_email  = false
+  ssh_key_ids       = [vultr_ssh_key.cirisbridge.id]
+  firewall_group_id = vultr_firewall_group.test[0].id
+  vpc2_ids          = [vultr_vpc2.test[0].id]
+
+  tags = ["cirisbridge", "test", "services"]
+}
+
+# Test Instance 3: Scout (CIRISManager + CIRIS Agent)
+resource "vultr_instance" "test_scout" {
+  count             = var.create_test_env ? 1 : 0
+  plan              = var.test_vultr_plan  # vc2-1c-1gb ~$6/mo
+  region            = var.vultr_region
+  os_id             = data.vultr_os.ubuntu.id
+  label             = "ciris-test-scout"
+  hostname          = "ciris-test-scout"
+  enable_ipv6       = true
+  backups           = "disabled"
+  ddos_protection   = false
+  activation_email  = false
+  ssh_key_ids       = [vultr_ssh_key.cirisbridge.id]
+  firewall_group_id = vultr_firewall_group.test[0].id
+  vpc2_ids          = [vultr_vpc2.test[0].id]
+
+  tags = ["cirisbridge", "test", "scout"]
+}

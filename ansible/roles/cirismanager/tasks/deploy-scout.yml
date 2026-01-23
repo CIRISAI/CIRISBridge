@@ -1,0 +1,128 @@
+---
+# Deploy Scout Agent with Covenant Metrics Adapter
+# This is run after the manager is installed
+# Uses dev token flow: get localhost token, then use for CLI commands
+
+- name: Template covenant metrics adapter config
+  ansible.builtin.template:
+    src: covenant_metrics_config.json.j2
+    dest: "{{ manager_config_dir }}/covenant_metrics_config.json"
+    owner: "{{ manager_user }}"
+    mode: '0600'
+
+- name: Set manager API URL
+  ansible.builtin.set_fact:
+    manager_api_url: "https://scout-test.{{ primary_domain }}"
+
+- name: Get dev token (localhost only - requires CIRIS_DEV_MODE=true)
+  ansible.builtin.shell: |
+    source {{ manager_install_dir }}/venv/bin/activate
+    ciris-manager-client auth dev-token 2>&1
+  args:
+    executable: /bin/bash
+  register: dev_token_result
+  failed_when: "'Dev token obtained' not in dev_token_result.stdout and 'already' not in dev_token_result.stdout.lower()"
+
+- name: Display dev token result
+  ansible.builtin.debug:
+    msg: "{{ dev_token_result.stdout }}"
+
+- name: Create scout agent
+  ansible.builtin.shell: |
+    source {{ manager_install_dir }}/venv/bin/activate
+    ciris-manager-client --api-url {{ manager_api_url }} agent create \
+      --name test-scout \
+      --template scout \
+      --server local \
+      --env CIRIS_LENS_ENDPOINT={{ cirislens_endpoint }} \
+      --env CIRIS_LENS_AUTH_TOKEN={{ cirislens_token }} \
+      --env CIRIS_USER_ID={{ test_user_id | default('ciris_test_canary') }} \
+      --env CIRIS_TRACE_LEVEL=full \
+      --billing-enabled \
+      --billing-api-key "{{ test_auth_token }}" \
+      2>&1
+  args:
+    executable: /bin/bash
+  register: agent_create_result
+  changed_when: "'agent_id' in agent_create_result.stdout"
+  failed_when: false
+
+- name: Extract agent ID
+  ansible.builtin.set_fact:
+    scout_agent_id: "{{ agent_create_result.stdout | regex_search('agent_id[\"\\s:]+([a-z0-9-]+)', '\\1') | first | default('') }}"
+  when: agent_create_result.rc == 0
+
+- name: Display agent creation result
+  ansible.builtin.debug:
+    msg: |
+      Agent Creation Result:
+      {{ agent_create_result.stdout }}
+
+      Agent ID: {{ scout_agent_id | default('NOT CREATED') }}
+
+- name: Wait for agent to be healthy
+  ansible.builtin.pause:
+    seconds: 30
+    prompt: "Waiting for agent to initialize..."
+  when: scout_agent_id | default('') | length > 0
+
+- name: Load covenant metrics adapter
+  ansible.builtin.shell: |
+    source {{ manager_install_dir }}/venv/bin/activate
+    ciris-manager-client --api-url {{ manager_api_url }} \
+      adapter load {{ scout_agent_id }} ciris_covenant_metrics \
+      --config-file {{ manager_config_dir }}/covenant_metrics_config.json \
+      2>&1
+  args:
+    executable: /bin/bash
+  register: adapter_load_result
+  when: scout_agent_id | default('') | length > 0
+  failed_when: false
+
+- name: Display adapter load result
+  ansible.builtin.debug:
+    msg: |
+      Adapter Load Result:
+      {{ adapter_load_result.stdout | default('Skipped - no agent ID') }}
+
+- name: Verify adapter loaded
+  ansible.builtin.shell: |
+    source {{ manager_install_dir }}/venv/bin/activate
+    ciris-manager-client --api-url {{ manager_api_url }} \
+      adapter list {{ scout_agent_id }} 2>&1
+  args:
+    executable: /bin/bash
+  register: adapter_list_result
+  when: scout_agent_id | default('') | length > 0
+
+- name: Get agent access details
+  ansible.builtin.shell: |
+    source {{ manager_install_dir }}/venv/bin/activate
+    ciris-manager-client --api-url {{ manager_api_url }} \
+      agent access {{ scout_agent_id }} 2>&1
+  args:
+    executable: /bin/bash
+  register: agent_access_result
+  when: scout_agent_id | default('') | length > 0
+
+- name: Display final status
+  ansible.builtin.debug:
+    msg: |
+      ============================================================
+      SCOUT AGENT DEPLOYED WITH COVENANT METRICS
+      ============================================================
+      Agent ID: {{ scout_agent_id | default('NOT CREATED') }}
+
+      Adapters Loaded:
+      {{ adapter_list_result.stdout | default('None') }}
+
+      Access Details:
+      {{ agent_access_result.stdout | default('Not available') }}
+
+      Telemetry flowing to:
+        {{ cirislens_endpoint }}
+
+      Verify traces:
+        curl -H "Authorization: Bearer {{ cirislens_token }}" \
+          "{{ cirislens_endpoint | replace('/logs/ingest', '') }}/agents/{{ scout_agent_id }}/traces?limit=10"
+      ============================================================

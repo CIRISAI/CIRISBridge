@@ -1,0 +1,367 @@
+---
+# Certificate Rotation Runbook
+# Rotate Let's Encrypt certificates for multi-instance deployments
+#
+# Usage:
+#   # Check certificate status on research infrastructure (origin certs via SSH)
+#   ansible-playbook runbooks/cert-rotate.yml --tags status
+#
+#   # Rotate cert using DNS challenge (requires Cloudflare API token)
+#   ansible-playbook runbooks/cert-rotate.yml --tags rotate -e "domain=scoutapilb.ciris.ai" -e "cf_token=YOUR_TOKEN"
+#
+#   # Rotate cert using HTTP challenge (requires single IP or coordinated stop)
+#   ansible-playbook runbooks/cert-rotate.yml --tags rotate-http -e "domain=scoutapilb.ciris.ai"
+#
+#   # Copy cert from primary to all secondaries
+#   ansible-playbook runbooks/cert-rotate.yml --tags distribute -e "domain=scoutapilb.ciris.ai"
+#
+#   # Restart nginx on all instances after cert update
+#   ansible-playbook runbooks/cert-rotate.yml --tags restart-nginx
+
+- name: "CERT ROTATE - Research Infrastructure Status"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [status]
+  vars:
+    research_hosts:
+      - name: scout1
+        ip: 144.202.55.195
+        domains:
+          - scoutapilb.ciris.ai
+      - name: scout2
+        ip: 45.76.18.133
+        domains:
+          - scoutapilb.ciris.ai
+    warning_days: 30
+    critical_days: 7
+    ssh_key: "~/.ssh/ciris_deploy"
+
+  tasks:
+    - name: "STATUS: Check origin certificates via SSH"
+      ansible.builtin.shell: |
+        echo "=== RESEARCH INFRASTRUCTURE - ORIGIN CERTIFICATE STATUS ==="
+        echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+        echo ""
+        echo "NOTE: These are ORIGIN server certs checked via SSH, not Cloudflare edge certs"
+        echo ""
+
+        {% for host in research_hosts %}
+        echo "=== {{ host.name }} ({{ host.ip }}) ==="
+        {% for domain in host.domains %}
+        echo "--- {{ domain }} ---"
+
+        # Check cert via SSH to origin server
+        CERT_INFO=$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ host.ip }} \
+          "openssl x509 -in /etc/letsencrypt/live/{{ domain }}/fullchain.pem -noout -dates -subject -issuer 2>/dev/null" 2>/dev/null || echo "ERROR: Cannot read certificate")
+
+        if echo "$CERT_INFO" | grep -q "ERROR"; then
+          echo "Status: FAILED - Cannot retrieve certificate from origin"
+          echo ""
+          continue
+        fi
+
+        # Extract dates
+        NOT_BEFORE=$(echo "$CERT_INFO" | grep "notBefore" | cut -d= -f2)
+        NOT_AFTER=$(echo "$CERT_INFO" | grep "notAfter" | cut -d= -f2)
+        SUBJECT=$(echo "$CERT_INFO" | grep "subject" | sed 's/subject=//')
+        ISSUER=$(echo "$CERT_INFO" | grep "issuer" | sed 's/issuer=//')
+
+        # Calculate days remaining
+        EXPIRY_EPOCH=$(date -d "$NOT_AFTER" +%s 2>/dev/null || echo 0)
+        CURRENT_EPOCH=$(date +%s)
+        DAYS_REMAINING=$(( ($EXPIRY_EPOCH - $CURRENT_EPOCH) / 86400 ))
+
+        # Determine status
+        if [ "$DAYS_REMAINING" -lt 0 ]; then
+          STATUS="EXPIRED"
+        elif [ "$DAYS_REMAINING" -le {{ critical_days }} ]; then
+          STATUS="CRITICAL"
+        elif [ "$DAYS_REMAINING" -le {{ warning_days }} ]; then
+          STATUS="WARNING"
+        else
+          STATUS="OK"
+        fi
+
+        echo "Status: $STATUS"
+        echo "Subject: $SUBJECT"
+        echo "Valid from: $NOT_BEFORE"
+        echo "Expires on: $NOT_AFTER"
+        echo "Days remaining: $DAYS_REMAINING"
+        echo "Issuer: $ISSUER"
+        echo ""
+        {% endfor %}
+        {% endfor %}
+      register: cert_status
+      changed_when: false
+
+    - name: "STATUS: Display"
+      ansible.builtin.debug:
+        msg: "{{ cert_status.stdout }}"
+
+- name: "CERT ROTATE - DNS Challenge (Cloudflare)"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [rotate, never]
+  vars:
+    domain: ""
+    cf_token: ""
+    primary_host: 144.202.55.195
+    ssh_key: "~/.ssh/ciris_deploy"
+    email: "admin@ciris.ai"
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.fail:
+        msg: "Required: -e 'domain=scoutapilb.ciris.ai' -e 'cf_token=YOUR_CLOUDFLARE_TOKEN'"
+      when: domain | length == 0 or cf_token | length == 0
+
+    - name: "ROTATE: Install certbot cloudflare plugin"
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ primary_host }} \
+          'apt-get update && apt-get install -y certbot python3-certbot-dns-cloudflare 2>&1 | tail -3'
+      register: install_result
+
+    - name: "ROTATE: Create Cloudflare credentials"
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ primary_host }} \
+          'mkdir -p /root/.secrets && chmod 700 /root/.secrets && echo "dns_cloudflare_api_token = {{ cf_token }}" > /root/.secrets/cloudflare.ini && chmod 600 /root/.secrets/cloudflare.ini'
+
+    - name: "ROTATE: Request certificate via DNS challenge"
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=120 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ primary_host }} \
+          'certbot certonly --dns-cloudflare --dns-cloudflare-credentials /root/.secrets/cloudflare.ini -d {{ domain }} --non-interactive --agree-tos --email {{ email }} 2>&1'
+      register: certbot_result
+      timeout: 180
+
+    - name: "ROTATE: Display result"
+      ansible.builtin.debug:
+        msg: "{{ certbot_result.stdout }}"
+
+    - name: "ROTATE: Verify new certificate"
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ primary_host }} \
+          'openssl x509 -in /etc/letsencrypt/live/{{ domain }}/fullchain.pem -noout -dates -subject'
+      register: verify_result
+
+    - name: "ROTATE: New certificate details"
+      ansible.builtin.debug:
+        msg: "{{ verify_result.stdout }}"
+
+- name: "CERT ROTATE - HTTP Challenge (Single IP)"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [rotate-http, never]
+  vars:
+    domain: ""
+    primary_host: 144.202.55.195
+    secondary_hosts:
+      - 45.76.18.133
+    ssh_key: "~/.ssh/ciris_deploy"
+    email: "admin@ciris.ai"
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.fail:
+        msg: "Required: -e 'domain=scoutapilb.ciris.ai'"
+      when: domain | length == 0
+
+    - name: "HTTP: Stop nginx on all hosts"
+      ansible.builtin.shell: |
+        echo "Stopping nginx on primary {{ primary_host }}..."
+        ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ primary_host }} 'docker stop ciris-nginx 2>/dev/null || true'
+        {% for host in secondary_hosts %}
+        echo "Stopping nginx on secondary {{ host }}..."
+        ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ host }} 'docker stop ciris-nginx 2>/dev/null || true'
+        {% endfor %}
+      register: stop_result
+
+    - name: "HTTP: Request certificate"
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=120 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ primary_host }} \
+          'certbot certonly --standalone -d {{ domain }} --non-interactive --agree-tos --email {{ email }} 2>&1'
+      register: certbot_result
+      timeout: 180
+
+    - name: "HTTP: Display result"
+      ansible.builtin.debug:
+        msg: "{{ certbot_result.stdout }}"
+
+- name: "CERT ROTATE - Distribute to Secondary Hosts"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [distribute, never]
+  vars:
+    domain: ""
+    primary_host: 144.202.55.195
+    secondary_hosts:
+      - 45.76.18.133
+    ssh_key: "~/.ssh/ciris_deploy"
+    cert_path: "/etc/letsencrypt/live"
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.fail:
+        msg: "Required: -e 'domain=scoutapilb.ciris.ai'"
+      when: domain | length == 0
+
+    - name: "DISTRIBUTE: Copy certs from primary to secondaries"
+      ansible.builtin.shell: |
+        echo "=== Distributing {{ domain }} certificates ==="
+        echo ""
+
+        # Create temp dir for cert transfer
+        TMPDIR=$(mktemp -d)
+        trap "rm -rf $TMPDIR" EXIT
+
+        echo "Fetching certs from primary ({{ primary_host }})..."
+        scp -o StrictHostKeyChecking=no -i {{ ssh_key }} \
+          root@{{ primary_host }}:{{ cert_path }}/{{ domain }}/fullchain.pem \
+          root@{{ primary_host }}:{{ cert_path }}/{{ domain }}/privkey.pem \
+          $TMPDIR/
+
+        if [ ! -f "$TMPDIR/fullchain.pem" ] || [ ! -f "$TMPDIR/privkey.pem" ]; then
+          echo "ERROR: Failed to fetch certificates from primary"
+          exit 1
+        fi
+
+        echo "Certificate fetched successfully"
+        openssl x509 -in $TMPDIR/fullchain.pem -noout -dates
+
+        {% for host in secondary_hosts %}
+        echo ""
+        echo "Copying to secondary {{ host }}..."
+        ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ host }} \
+          "mkdir -p {{ cert_path }}/{{ domain }}"
+        scp -o StrictHostKeyChecking=no -i {{ ssh_key }} \
+          $TMPDIR/fullchain.pem $TMPDIR/privkey.pem \
+          root@{{ host }}:{{ cert_path }}/{{ domain }}/
+        echo "Verifying on {{ host }}..."
+        ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ host }} \
+          "openssl x509 -in {{ cert_path }}/{{ domain }}/fullchain.pem -noout -dates"
+        {% endfor %}
+
+        echo ""
+        echo "Certificate distribution complete"
+      register: distribute_result
+
+    - name: "DISTRIBUTE: Display"
+      ansible.builtin.debug:
+        msg: "{{ distribute_result.stdout }}"
+
+- name: "CERT ROTATE - Restart Nginx on All Hosts"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [restart-nginx, never]
+  vars:
+    all_hosts:
+      - 144.202.55.195
+      - 45.76.18.133
+    ssh_key: "~/.ssh/ciris_deploy"
+
+  tasks:
+    - name: "RESTART: Start nginx on all hosts"
+      ansible.builtin.shell: |
+        echo "=== Restarting nginx on all hosts ==="
+        {% for host in all_hosts %}
+        echo ""
+        echo "Starting nginx on {{ host }}..."
+        ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ host }} \
+          'docker start ciris-nginx && sleep 2 && docker ps --format "{% raw %}{{.Names}}: {{.Status}}{% endraw %}" | grep nginx'
+        {% endfor %}
+        echo ""
+        echo "All nginx instances restarted"
+      register: restart_result
+
+    - name: "RESTART: Display"
+      ansible.builtin.debug:
+        msg: "{{ restart_result.stdout }}"
+
+- name: "CERT ROTATE - Full Rotation Workflow"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [full-rotate, never]
+  vars:
+    domain: ""
+    cf_token: ""
+    primary_host: 144.202.55.195
+    secondary_hosts:
+      - 45.76.18.133
+    ssh_key: "~/.ssh/ciris_deploy"
+    email: "admin@ciris.ai"
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.fail:
+        msg: "Required: -e 'domain=scoutapilb.ciris.ai' -e 'cf_token=YOUR_CLOUDFLARE_TOKEN'"
+      when: domain | length == 0 or cf_token | length == 0
+
+    - name: "FULL: Stop nginx everywhere"
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=10 -i {{ ssh_key }} root@{{ primary_host }} 'docker stop ciris-nginx 2>/dev/null || true'
+        {% for host in secondary_hosts %}
+        ssh -o ConnectTimeout=10 -i {{ ssh_key }} root@{{ host }} 'docker stop ciris-nginx 2>/dev/null || true'
+        {% endfor %}
+
+    - name: "FULL: Setup Cloudflare credentials"
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=10 -i {{ ssh_key }} root@{{ primary_host }} \
+          'mkdir -p /root/.secrets && chmod 700 /root/.secrets && echo "dns_cloudflare_api_token = {{ cf_token }}" > /root/.secrets/cloudflare.ini && chmod 600 /root/.secrets/cloudflare.ini'
+
+    - name: "FULL: Request new certificate"
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=120 -i {{ ssh_key }} root@{{ primary_host }} \
+          'apt-get update -qq && apt-get install -y -qq certbot python3-certbot-dns-cloudflare && certbot certonly --dns-cloudflare --dns-cloudflare-credentials /root/.secrets/cloudflare.ini -d {{ domain }} --non-interactive --agree-tos --email {{ email }} 2>&1'
+      register: certbot_result
+      timeout: 180
+
+    - name: "FULL: Certbot result"
+      ansible.builtin.debug:
+        msg: "{{ certbot_result.stdout }}"
+
+    - name: "FULL: Distribute to secondaries"
+      ansible.builtin.shell: |
+        TMPDIR=$(mktemp -d)
+        trap "rm -rf $TMPDIR" EXIT
+
+        scp -o StrictHostKeyChecking=no -i {{ ssh_key }} \
+          root@{{ primary_host }}:/etc/letsencrypt/live/{{ domain }}/fullchain.pem \
+          root@{{ primary_host }}:/etc/letsencrypt/live/{{ domain }}/privkey.pem \
+          $TMPDIR/
+
+        {% for host in secondary_hosts %}
+        ssh -o ConnectTimeout=10 -i {{ ssh_key }} root@{{ host }} "mkdir -p /etc/letsencrypt/live/{{ domain }}"
+        scp -o StrictHostKeyChecking=no -i {{ ssh_key }} $TMPDIR/fullchain.pem $TMPDIR/privkey.pem root@{{ host }}:/etc/letsencrypt/live/{{ domain }}/
+        {% endfor %}
+      register: distribute_result
+
+    - name: "FULL: Restart nginx everywhere"
+      ansible.builtin.shell: |
+        ssh -o ConnectTimeout=10 -i {{ ssh_key }} root@{{ primary_host }} 'docker start ciris-nginx'
+        {% for host in secondary_hosts %}
+        ssh -o ConnectTimeout=10 -i {{ ssh_key }} root@{{ host }} 'docker start ciris-nginx'
+        {% endfor %}
+
+    - name: "FULL: Verify certificates"
+      ansible.builtin.shell: |
+        echo "=== Certificate Verification ==="
+        echo ""
+        echo "Primary ({{ primary_host }}):"
+        ssh -o ConnectTimeout=10 -i {{ ssh_key }} root@{{ primary_host }} \
+          'openssl x509 -in /etc/letsencrypt/live/{{ domain }}/fullchain.pem -noout -dates -subject'
+        {% for host in secondary_hosts %}
+        echo ""
+        echo "Secondary ({{ host }}):"
+        ssh -o ConnectTimeout=10 -i {{ ssh_key }} root@{{ host }} \
+          'openssl x509 -in /etc/letsencrypt/live/{{ domain }}/fullchain.pem -noout -dates -subject'
+        {% endfor %}
+      register: verify_result
+
+    - name: "FULL: Final status"
+      ansible.builtin.debug:
+        msg: "{{ verify_result.stdout }}"

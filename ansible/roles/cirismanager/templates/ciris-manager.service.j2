@@ -1,0 +1,37 @@
+[Unit]
+Description=CIRISManager - CIRIS Agent Orchestration Service
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User={{ manager_user }}
+WorkingDirectory={{ manager_install_dir }}
+Environment="PATH={{ manager_install_dir }}/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="CIRIS_MANAGER_CONFIG={{ manager_config_dir }}/config.yml"
+{% if manager_dev_mode | default(false) %}
+Environment="CIRIS_DEV_MODE=true"
+{% endif %}
+
+ExecStart={{ manager_install_dir }}/venv/bin/ciris-manager serve \
+    --host {{ manager_api_host }} \
+    --port {{ manager_api_port }} \
+    --config {{ manager_config_dir }}/config.yml
+
+Restart=always
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ manager_data_dir }} {{ manager_log_dir }}
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={{ manager_service_name }}
+
+[Install]
+WantedBy=multi-user.target

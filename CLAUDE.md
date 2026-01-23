@@ -77,6 +77,90 @@ Agents cannot serve this mission if users cannot reach them. CIRISBridge provide
 | CIRISLens | `https://lens.ciris-services-1.ai` (US only) |
 | Agents API | `https://agents.ciris-services-1.ai` (alias for billing) |
 
+### Test Environment (Full E2E Stack)
+
+Complete test stack with spin up/down capability for end-to-end testing.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TEST ENVIRONMENT (Vultr VPC: 10.0.0.0/24)                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐ │
+│  │ test-infra          │  │ test-services       │  │ test-scout          │ │
+│  │ ~$12/mo             │  │ ~$24/mo             │  │ ~$6/mo              │ │
+│  ├─────────────────────┤  ├─────────────────────┤  ├─────────────────────┤ │
+│  │ - PostgreSQL        │  │ - CIRISBilling      │  │ - CIRISManager      │ │
+│  │ - CIRISLens         │  │   (test auth)       │  │ - CIRIS Agent       │ │
+│  │ - Grafana           │  │ - CIRISProxy        │  │                     │ │
+│  └─────────────────────┘  └─────────────────────┘  └─────────────────────┘ │
+│                                                                             │
+│  DNS: lens-test / billing-test / proxy-test / scout-test .ciris-services-1.ai │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Spin Up/Down (Single Command):**
+```bash
+# Spin UP (~$42/month when running)
+ansible-playbook runbooks/test-env.yml --tags up --vault-password-file ~/.vault_pass
+
+# Spin DOWN ($0/month when destroyed)
+ansible-playbook runbooks/test-env.yml --tags down
+
+# Check status
+ansible-playbook runbooks/test-env.yml --tags status
+
+# Run end-to-end test
+ansible-playbook runbooks/test-env.yml --tags test --vault-password-file ~/.vault_pass
+```
+
+**Manual Provisioning:**
+```bash
+# 1. Create infrastructure
+cd terraform && terraform apply -var="create_test_env=true"
+
+# 2. Add Cloudflare DNS records (from terraform output)
+#    lens-test.ciris-services-1.ai    -> test_infra_ip
+#    billing-test.ciris-services-1.ai -> test_services_ip
+#    proxy-test.ciris-services-1.ai   -> test_services_ip
+#    scout-test.ciris-services-1.ai   -> test_scout_ip
+
+# 3. Deploy services
+cd ../ansible
+ansible-playbook -i inventory/test-dynamic.yml playbooks/deploy-test-stack.yml \
+  --vault-password-file ~/.vault_pass
+
+# 4. Destroy when done
+cd ../terraform && terraform apply -var="create_test_env=false" -auto-approve
+```
+
+**Test Auth Usage:**
+```bash
+# Check credits
+curl -X POST https://billing-test.ciris-services-1.ai/v1/billing/credits/check \
+  -H "Authorization: Bearer <TEST_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"oauth_provider": "oauth:test", "external_id": "ciris_test_canary"}'
+
+# LLM request through proxy
+curl -X POST https://proxy-test.ciris-services-1.ai/v1/chat/completions \
+  -H "Authorization: Bearer <TEST_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "groq/llama-3.3-70b-versatile", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+**Cost:**
+| State | Monthly Cost |
+|-------|--------------|
+| Running | ~$42/month (3 servers) |
+| Destroyed | $0/month |
+
+**Security:**
+- All servers in isolated VPC (10.0.0.0/24)
+- SSH restricted to admin IP only
+- Test auth ONLY enabled on test servers (never production)
+- Test token stored in Ansible Vault
+- Destroyed when not in use
+
 ### Legacy Infrastructure (Pending Migration)
 
 These servers predate CIRISBridge and need DNS cutover. See `runbooks/legacy-migration.yml`.
@@ -120,12 +204,14 @@ Service tokens must be created in the `cirislens.service_tokens` table for billi
 
 | File | Purpose |
 |------|---------|
-| `terraform/main.tf` | Infrastructure provisioning (Vultr + Hetzner) |
+| `terraform/main.tf` | Infrastructure provisioning (Vultr + Hetzner + Test VPC) |
 | `terraform/variables.tf` | Configurable parameters |
 | `ansible/playbooks/site.yml` | Full deployment playbook |
+| `ansible/playbooks/deploy-test.yml` | Test environment deployment |
 | `ansible/roles/*/tasks/main.yml` | Service-specific deployment |
 | `ansible/roles/*/templates/*.j2` | Service configuration templates |
-| `ansible/inventory/production.yml` | Secrets and node configuration |
+| `ansible/inventory/production.yml` | Production secrets and node config |
+| `ansible/inventory/test.yml` | Test environment inventory |
 | `FSD.md` | Locked specification (do not modify) |
 
 ## Build/Deploy Commands
@@ -153,6 +239,12 @@ ansible all -i inventory/production.yml -m shell -a 'docker logs ciris-billing -
 
 # Check scheduler timers
 ansible all -i inventory/production.yml -m shell -a 'systemctl list-timers | grep ciris'
+
+# Test Environment (spin up/down full e2e stack)
+ansible-playbook runbooks/test-env.yml --tags up --vault-password-file ~/.vault_pass    # Spin up (~$42/mo)
+ansible-playbook runbooks/test-env.yml --tags down                                       # Spin down ($0/mo)
+ansible-playbook runbooks/test-env.yml --tags status                                     # Health check
+ansible-playbook runbooks/test-env.yml --tags test --vault-password-file ~/.vault_pass  # E2E test
 ```
 
 ## Billing Update Lifecycle
@@ -238,6 +330,12 @@ Operational runbooks for incident response and infrastructure management are in 
 | `billing-rollback.yml` | Rollback billing to previous version |
 | `legacy-migration.yml` | Migrate from legacy servers to CIRISBridge |
 | `scout-ops.yml` | Scout agent database queries (stuck thoughts, stats) |
+| `cert-rotate.yml` | Rotate SSL certs for multi-instance deployments |
+
+**Test Environment:**
+| Runbook | Purpose |
+|---------|---------|
+| `test-env.yml` | Spin up/down full e2e test stack (~$42/mo when running, $0 when destroyed) |
 
 ### Common Runbook Commands
 

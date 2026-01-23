@@ -1,0 +1,88 @@
+# CIRISBridge Test Environment Deployment
+# Deploys minimal billing stack with test authentication enabled
+#
+# Usage:
+#   ansible-playbook -i inventory/test.yml playbooks/deploy-test.yml --vault-password-file ~/.vault_pass
+#
+# Prerequisites:
+#   1. Terraform provisioned: terraform apply -var="create_test_env=true"
+#   2. Update inventory/test.yml with test_server_ip from terraform output
+#   3. Add DNS record: billing-test.ciris-services-1.ai -> test_server_ip
+#   4. Add vault secrets for test auth token and database passwords
+#
+# Components:
+#   - Common: Base system setup
+#   - PostgreSQL: Standalone (no replication)
+#   - Caddy: TLS termination
+#   - Billing: With test auth enabled
+#
+# NOT included (test env only needs billing):
+#   - Constellation DNS (uses Cloudflare)
+#   - CIRISProxy (not needed for billing tests)
+#   - CIRISLens (not needed for isolated tests)
+#   - Scheduler (no automated health checks)
+
+---
+- name: Common setup for test node
+  hosts: test
+  become: true
+  roles:
+    - common
+  tags: [common]
+
+- name: Deploy PostgreSQL (standalone - no replication)
+  hosts: test
+  become: true
+  roles:
+    - postgres
+  vars:
+    postgres_standalone: true
+  tags: [postgres]
+
+- name: Deploy Caddy (TLS termination)
+  hosts: test
+  become: true
+  roles:
+    - caddy
+  tags: [caddy]
+
+- name: Deploy CIRISBilling (test auth enabled)
+  hosts: test
+  become: true
+  roles:
+    - billing
+  tags: [billing]
+
+# =============================================================================
+# Post-deployment verification
+# =============================================================================
+- name: Verify test deployment
+  hosts: test
+  become: true
+  tasks:
+    - name: Wait for billing to be healthy
+      ansible.builtin.uri:
+        url: "http://localhost:8080/health"
+        status_code: 200
+      register: health
+      retries: 10
+      delay: 5
+      until: health.status == 200
+
+    - name: Display test environment info
+      ansible.builtin.debug:
+        msg: |
+          Test Environment Ready
+          ======================
+
+          Billing API: https://billing-test.{{ primary_domain }}
+          Health:      https://billing-test.{{ primary_domain }}/health
+
+          Test Auth Usage:
+            curl -X POST https://billing-test.{{ primary_domain }}/v1/billing/credits/check \
+              -H "Authorization: Bearer <CIRIS_TEST_AUTH_TOKEN>" \
+              -H "Content-Type: application/json" \
+              -d '{"oauth_provider": "oauth:test", "external_id": "ciris_synthetic_canary"}'
+
+          Note: Test auth token is in Ansible vault (vault_test_auth_token)
+  tags: [verify]

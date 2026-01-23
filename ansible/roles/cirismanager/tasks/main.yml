@@ -1,0 +1,99 @@
+---
+# CIRISManager Ansible Role
+# Installs and configures CIRISManager for agent orchestration
+
+- name: Install system dependencies
+  ansible.builtin.apt:
+    name:
+      - python3.11
+      - python3.11-venv
+      - python3.11-dev
+      - git
+      - build-essential
+      - nginx
+      - certbot
+      - python3-certbot-nginx
+    state: present
+    update_cache: true
+
+- name: Create manager directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ manager_user }}"
+    mode: '0755'
+  loop:
+    - "{{ manager_config_dir }}"
+    - "{{ manager_config_dir }}/docker-certs"
+    - "{{ manager_data_dir }}"
+    - "{{ manager_data_dir }}/agents"
+    - "{{ manager_log_dir }}"
+
+- name: Clone CIRISManager repository
+  ansible.builtin.git:
+    repo: "{{ manager_repo }}"
+    dest: "{{ manager_install_dir }}"
+    version: "{{ manager_version }}"
+    force: true
+  notify: Restart ciris-manager
+
+- name: Create Python virtual environment
+  ansible.builtin.command:
+    cmd: python{{ python_version }} -m venv {{ manager_install_dir }}/venv
+    creates: "{{ manager_install_dir }}/venv/bin/python"
+
+- name: Install CIRISManager in virtual environment
+  ansible.builtin.pip:
+    name: "{{ manager_install_dir }}"
+    state: present
+    editable: true
+    virtualenv: "{{ manager_install_dir }}/venv"
+  notify: Restart ciris-manager
+
+- name: Template manager configuration
+  ansible.builtin.template:
+    src: config.yml.j2
+    dest: "{{ manager_config_dir }}/config.yml"
+    owner: "{{ manager_user }}"
+    mode: '0600'
+  notify: Restart ciris-manager
+
+- name: Template systemd service
+  ansible.builtin.template:
+    src: ciris-manager.service.j2
+    dest: /etc/systemd/system/{{ manager_service_name }}.service
+    owner: root
+    mode: '0644'
+  notify:
+    - Reload systemd
+    - Restart ciris-manager
+
+- name: Enable and start CIRISManager service
+  ansible.builtin.systemd:
+    name: "{{ manager_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait for manager to be ready
+  ansible.builtin.uri:
+    url: "http://localhost:{{ manager_api_port }}/health"
+    status_code: 200
+  register: health_check
+  retries: 10
+  delay: 5
+  until: health_check.status == 200
+
+- name: Display manager status
+  ansible.builtin.debug:
+    msg: |
+      CIRISManager installed and running!
+
+      API: http://localhost:{{ manager_api_port }}
+      Config: {{ manager_config_dir }}/config.yml
+      Logs: journalctl -u {{ manager_service_name }} -f
+
+      CLI Usage:
+        source {{ manager_install_dir }}/venv/bin/activate
+        ciris-manager-client auth login
+        ciris-manager-client agent list

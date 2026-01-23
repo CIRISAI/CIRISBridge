@@ -298,3 +298,97 @@
         - name: "HEALTH: Display"
           ansible.builtin.debug:
             msg: "{{ tls_health.stdout }}"
+
+# =============================================================================
+# RESEARCH INFRASTRUCTURE - Check ORIGIN certificates via SSH
+# =============================================================================
+# NOTE: Checks actual origin server certs, not Cloudflare edge certs
+- name: "TLS CERTIFICATE STATUS - Research Infrastructure (Origin)"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [status, research]
+  vars:
+    warning_days: 30
+    critical_days: 7
+    ssh_key: "~/.ssh/ciris_deploy"
+    # Research hosts with their domains
+    research_hosts:
+      - name: scout1
+        ip: 144.202.55.195
+        domains:
+          - scoutapilb.ciris.ai
+      - name: scout2
+        ip: 45.76.18.133
+        domains:
+          - scoutapilb.ciris.ai
+
+  tasks:
+    - name: "RESEARCH: Check origin certificates via SSH"
+      ansible.builtin.shell: |
+        echo "=== RESEARCH INFRASTRUCTURE - ORIGIN CERTIFICATE STATUS ==="
+        echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+        echo ""
+        echo "NOTE: Checking ORIGIN server certs via SSH (not Cloudflare edge certs)"
+        echo ""
+
+        FAILED=0
+        {% for host in research_hosts %}
+        echo "=== {{ host.name }} ({{ host.ip }}) ==="
+        {% for domain in host.domains %}
+        echo "--- {{ domain }} ---"
+
+        # Check cert via SSH to origin server
+        CERT_INFO=$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i {{ ssh_key }} root@{{ host.ip }} \
+          "openssl x509 -in /etc/letsencrypt/live/{{ domain }}/fullchain.pem -noout -dates -subject -issuer 2>/dev/null" 2>/dev/null)
+
+        if [ -z "$CERT_INFO" ]; then
+          echo "Status: FAILED - Cannot read certificate from origin"
+          FAILED=$((FAILED + 1))
+          echo ""
+          continue
+        fi
+
+        # Extract dates
+        NOT_BEFORE=$(echo "$CERT_INFO" | grep "notBefore" | cut -d= -f2)
+        NOT_AFTER=$(echo "$CERT_INFO" | grep "notAfter" | cut -d= -f2)
+        SUBJECT=$(echo "$CERT_INFO" | grep "subject" | sed 's/subject=//')
+        ISSUER=$(echo "$CERT_INFO" | grep "issuer" | sed 's/issuer=//')
+
+        # Calculate days remaining
+        EXPIRY_EPOCH=$(date -d "$NOT_AFTER" +%s 2>/dev/null || echo 0)
+        CURRENT_EPOCH=$(date +%s)
+        DAYS_REMAINING=$(( ($EXPIRY_EPOCH - $CURRENT_EPOCH) / 86400 ))
+
+        # Determine status
+        if [ "$DAYS_REMAINING" -lt 0 ]; then
+          STATUS="EXPIRED"
+        elif [ "$DAYS_REMAINING" -le {{ critical_days }} ]; then
+          STATUS="CRITICAL"
+        elif [ "$DAYS_REMAINING" -le {{ warning_days }} ]; then
+          STATUS="WARNING"
+        else
+          STATUS="OK"
+        fi
+
+        echo "Status: $STATUS"
+        echo "Subject: $SUBJECT"
+        echo "Valid from: $NOT_BEFORE"
+        echo "Expires on: $NOT_AFTER"
+        echo "Days remaining: $DAYS_REMAINING"
+        echo "Issuer: $ISSUER"
+        echo ""
+        {% endfor %}
+        {% endfor %}
+
+        if [ $FAILED -gt 0 ]; then
+          echo "WARNING: $FAILED cert(s) failed origin check"
+        else
+          echo "All research origin certificates OK"
+        fi
+      register: research_cert_status
+      changed_when: false
+
+    - name: "RESEARCH: Display"
+      ansible.builtin.debug:
+        msg: "{{ research_cert_status.stdout }}"

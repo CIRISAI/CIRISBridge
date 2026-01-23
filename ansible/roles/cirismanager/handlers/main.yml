@@ -1,0 +1,11 @@
+---
+# CIRISManager Handlers
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart ciris-manager
+  ansible.builtin.systemd:
+    name: "{{ manager_service_name }}"
+    state: restarted

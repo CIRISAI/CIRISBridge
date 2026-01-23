@@ -1,0 +1,151 @@
+# CIRISBridge Test Environment Inventory
+# Full stack: PostgreSQL + Lens, Billing + Proxy, Manager + Scout
+#
+# Usage:
+#   1. Run: cd terraform && terraform apply -var="create_test_env=true"
+#   2. Copy IPs from terraform output to hosts below
+#   3. Add Cloudflare DNS records (see terraform output test_dns_records)
+#   4. Add vault secrets (see vars section)
+#   5. Run: ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml --vault-password-file ~/.vault_pass
+
+all:
+  children:
+    # ==========================================================================
+    # Test Infrastructure: PostgreSQL + CIRISLens
+    # ==========================================================================
+    test_infra:
+      hosts:
+        test-infra:
+          # Update after terraform apply
+          ansible_host: "{{ test_infra_ip }}"
+          internal_ip: "{{ test_infra_vpc_ip }}"
+
+          # Services on this host
+          deploy_postgres: true
+          deploy_lens: true
+
+          # PostgreSQL config
+          postgres_standalone: true
+          postgres_password: "{{ vault_test_postgres_password }}"
+
+          # Lens config
+          lens_db_password: "{{ vault_test_lens_db_password }}"
+          lens_grafana_admin_password: "{{ vault_test_grafana_password }}"
+          lens_grafana_secret_key: "{{ vault_test_grafana_secret }}"
+          lens_session_secret: "{{ vault_test_lens_session_secret }}"
+
+    # ==========================================================================
+    # Test Services: CIRISBilling + CIRISProxy
+    # ==========================================================================
+    test_services:
+      hosts:
+        test-services:
+          # Update after terraform apply
+          ansible_host: "{{ test_services_ip }}"
+          internal_ip: "{{ test_services_vpc_ip }}"
+
+          # Services on this host
+          deploy_billing: true
+          deploy_proxy: true
+
+          # Database connection (to test-infra via VPC)
+          postgres_host: "{{ test_infra_vpc_ip }}"
+          postgres_password: "{{ vault_test_postgres_password }}"
+
+          # Billing config - TEST AUTH ENABLED
+          billing_test_auth_enabled: true
+          billing_test_auth_token: "{{ vault_test_auth_token }}"
+          billing_test_user_id: "ciris_test_canary"
+
+          # Billing secrets
+          jwt_secret_key: "{{ vault_test_jwt_secret }}"
+          admin_jwt_secret: "{{ vault_test_admin_jwt_secret }}"
+          encryption_key: "{{ vault_test_encryption_key }}"
+
+          # Proxy config
+          billing_api_url: "http://ciris-billing:8000"
+          billing_api_key: "{{ vault_test_billing_api_key }}"
+
+          # LLM API keys (real keys for actual e2e testing)
+          groq_api_key: "{{ vault_groq_api_key }}"
+          together_api_key: "{{ vault_together_api_key }}"
+          openrouter_api_key: "{{ vault_openrouter_api_key }}"
+
+          # Web search
+          exa_api_key: "{{ vault_exa_api_key }}"
+
+          # Lens integration (for billing and proxy telemetry)
+          cirislens_token: "{{ vault_test_cirislens_token }}"
+          cirislens_endpoint: "https://lens-test.{{ primary_domain }}/lens-api/api/v1/logs/ingest"
+          proxy_cirislens_token: "{{ vault_test_cirislens_token }}"
+          proxy_cirislens_endpoint: "https://lens-test.{{ primary_domain }}/lens-api/api/v1/logs/ingest"
+
+    # ==========================================================================
+    # Test Scout: CIRISManager + CIRIS Agent
+    # ==========================================================================
+    test_scout:
+      hosts:
+        test-scout:
+          # Update after terraform apply
+          ansible_host: "{{ test_scout_ip }}"
+          internal_ip: "{{ test_scout_vpc_ip }}"
+
+          # Services on this host
+          deploy_manager: true
+          deploy_scout_agent: true
+
+          # Manager config
+          manager_port: 8090
+          manager_image: "ghcr.io/cirisai/cirismanager:latest"
+          manager_dev_mode: true  # Enable dev token endpoint (localhost only)
+
+          # Connection to test services
+          billing_api_url: "https://billing-test.{{ primary_domain }}"
+          proxy_api_url: "https://proxy-test.{{ primary_domain }}"
+
+          # Test auth credentials (for scout to use)
+          test_auth_token: "{{ vault_test_auth_token }}"
+          test_user_id: "ciris_test_canary"
+
+          # Lens integration (for manager and scout telemetry)
+          cirislens_endpoint: "https://lens-test.{{ primary_domain }}/lens-api/api/v1/logs/ingest"
+          cirislens_token: "{{ vault_test_cirislens_token }}"
+
+  # ============================================================================
+  # Global Variables
+  # ============================================================================
+  vars:
+    # Ansible
+    ansible_user: root
+    ansible_python_interpreter: /usr/bin/python3
+
+    # Environment
+    environment: test
+    primary_domain: ciris-services-1.ai
+
+    # Topology
+    topology: standalone
+
+    # Docker images
+    billing_image: "ghcr.io/cirisai/cirisbilling:latest"
+    proxy_image: "ghcr.io/cirisai/cirisproxy:latest"
+    lens_api_image: "ghcr.io/cirisai/cirislens-api:latest"
+
+    # =========================================================================
+    # Vault Secrets - Add these to your vault
+    # =========================================================================
+    # vault_test_postgres_password: <generate>
+    # vault_test_lens_db_password: <generate>
+    # vault_test_grafana_password: <generate>
+    # vault_test_grafana_secret: <generate>
+    # vault_test_lens_session_secret: <generate>
+    # vault_test_auth_token: <generate>  # Test auth token for billing
+    # vault_test_jwt_secret: <generate>
+    # vault_test_admin_jwt_secret: <generate>
+    # vault_test_encryption_key: <generate>
+    # vault_test_billing_api_key: <generate>
+    # vault_test_cirislens_token: <generate>
+    # vault_groq_api_key: <from production>
+    # vault_together_api_key: <from production>
+    # vault_openrouter_api_key: <from production>
+    # vault_exa_api_key: <from production>

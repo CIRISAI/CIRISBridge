@@ -103,3 +103,45 @@ lens.{{ dns_soa }} {
 {{ dns_soa }} {
     respond "CIRIS Infrastructure - {{ dns_soa }}" 200
 }
+
+{% if inventory_hostname == 'vultr' %}
+# Legacy domain aliases (migrated from old infrastructure)
+# Using imported certs from legacy servers
+
+llm.ciris.ai {
+    tls /opt/ciris/caddy/certs/llm.ciris.ai.fullchain.pem /opt/ciris/caddy/certs/llm.ciris.ai.privkey.pem
+    reverse_proxy ciris-proxy:{{ proxy_port }}
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/llm-legacy.log
+        format json
+    }
+}
+
+billing.ciris.ai {
+    # Auto-provision cert via ACME (old cert expired Jan 7)
+    reverse_proxy ciris-billing:8000 {
+        health_uri /health
+        health_interval 30s
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/billing-legacy.log
+        format json
+    }
+}
+{% endif %}

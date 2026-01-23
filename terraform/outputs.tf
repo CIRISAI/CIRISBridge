@@ -216,3 +216,114 @@ output "architecture_summary" {
     Both nodes are equal peers. No primary/secondary distinction.
   EOT
 }
+
+# =============================================================================
+# Test Environment Outputs (Conditional - 3 server full stack)
+# =============================================================================
+
+output "test_infra_ip" {
+  description = "Test infra node (PostgreSQL + Lens) public IPv4"
+  value       = var.create_test_env ? vultr_instance.test_infra[0].main_ip : null
+}
+
+output "test_infra_vpc_ip" {
+  description = "Test infra node internal VPC IP"
+  value       = var.create_test_env ? vultr_instance.test_infra[0].internal_ip : null
+}
+
+output "test_services_ip" {
+  description = "Test services node (Billing + Proxy) public IPv4"
+  value       = var.create_test_env ? vultr_instance.test_services[0].main_ip : null
+}
+
+output "test_services_vpc_ip" {
+  description = "Test services node internal VPC IP"
+  value       = var.create_test_env ? vultr_instance.test_services[0].internal_ip : null
+}
+
+output "test_scout_ip" {
+  description = "Test scout node (Manager + Agent) public IPv4"
+  value       = var.create_test_env ? vultr_instance.test_scout[0].main_ip : null
+}
+
+output "test_scout_vpc_ip" {
+  description = "Test scout node internal VPC IP"
+  value       = var.create_test_env ? vultr_instance.test_scout[0].internal_ip : null
+}
+
+output "ssh_test_infra" {
+  description = "SSH command for test infra node"
+  value       = var.create_test_env ? "ssh root@${vultr_instance.test_infra[0].main_ip}" : null
+}
+
+output "ssh_test_services" {
+  description = "SSH command for test services node"
+  value       = var.create_test_env ? "ssh root@${vultr_instance.test_services[0].main_ip}" : null
+}
+
+output "ssh_test_scout" {
+  description = "SSH command for test scout node"
+  value       = var.create_test_env ? "ssh root@${vultr_instance.test_scout[0].main_ip}" : null
+}
+
+output "test_dns_records" {
+  description = "DNS records to add to Cloudflare for test environment"
+  value = var.create_test_env ? <<-EOT
+    Add these A records to Cloudflare for ${var.primary_domain}:
+
+    lens-test     -> ${vultr_instance.test_infra[0].main_ip}
+    billing-test  -> ${vultr_instance.test_services[0].main_ip}
+    proxy-test    -> ${vultr_instance.test_services[0].main_ip}
+    scout-test    -> ${vultr_instance.test_scout[0].main_ip}
+  EOT : null
+}
+
+output "test_ansible_inventory" {
+  description = "Ansible inventory for test environment"
+  value = var.create_test_env ? <<-EOT
+    # Test Environment Inventory
+    # Save to: ansible/inventory/test.yml
+    all:
+      children:
+        test_infra:
+          hosts:
+            test-infra:
+              ansible_host: ${vultr_instance.test_infra[0].main_ip}
+              internal_ip: ${vultr_instance.test_infra[0].internal_ip}
+
+        test_services:
+          hosts:
+            test-services:
+              ansible_host: ${vultr_instance.test_services[0].main_ip}
+              internal_ip: ${vultr_instance.test_services[0].internal_ip}
+              infra_ip: ${vultr_instance.test_infra[0].internal_ip}
+
+        test_scout:
+          hosts:
+            test-scout:
+              ansible_host: ${vultr_instance.test_scout[0].main_ip}
+              internal_ip: ${vultr_instance.test_scout[0].internal_ip}
+              services_ip: ${vultr_instance.test_services[0].internal_ip}
+
+      vars:
+        ansible_user: root
+        primary_domain: ${var.primary_domain}
+        environment: test
+        postgres_standalone: true
+  EOT : null
+}
+
+output "test_cost_estimate" {
+  description = "Test environment monthly cost"
+  value = var.create_test_env ? <<-EOT
+    Test Environment (Full Stack)
+    =============================
+    test-infra (vc2-1c-2gb):    ~$12.00/month  (PostgreSQL + Lens)
+    test-services (vc2-2c-4gb): ~$24.00/month  (Billing + Proxy)
+    test-scout (vc2-1c-1gb):    ~$6.00/month   (Manager + Agent)
+    VPC:                        Free
+    ----------------------------------------
+    Total when running:         ~$42.00/month
+    Total when destroyed:       $0.00/month
+  EOT : null
+}

@@ -1,0 +1,9 @@
+{
+  "endpoint_url": "{{ cirislens_endpoint | default('https://lens-test.' + primary_domain + '/lens-api/api/v1/logs/ingest') }}",
+  "batch_size": 10,
+  "trace_level": "full",
+  "include_reasoning_chains": true,
+  "include_deontic_alignment": true,
+  "include_coherence_metrics": true,
+  "auth_token": "{{ cirislens_token }}"
+}

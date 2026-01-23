@@ -1,0 +1,493 @@
+---
+# Test Environment Spin Up/Down Runbook
+# Single-click management of the full test stack
+#
+# Usage:
+#   # Spin UP test environment (~$42/month when running)
+#   ansible-playbook runbooks/test-env.yml --tags up --vault-password-file ~/.vault_pass
+#
+#   # Spin DOWN test environment ($0/month when destroyed)
+#   ansible-playbook runbooks/test-env.yml --tags down
+#
+#   # Check test environment status
+#   ansible-playbook runbooks/test-env.yml --tags status
+#
+#   # Run end-to-end test through the stack
+#   ansible-playbook runbooks/test-env.yml --tags test --vault-password-file ~/.vault_pass
+#
+#   # Generate test credentials only
+#   ansible-playbook runbooks/test-env.yml --tags credentials --vault-password-file ~/.vault_pass
+
+# =============================================================================
+# SPIN UP - Create infrastructure and deploy services
+# =============================================================================
+- name: "TEST ENV UP - Provision and Deploy"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [up, never]
+  vars:
+    terraform_dir: "{{ playbook_dir }}/../../terraform"
+    ansible_dir: "{{ playbook_dir }}/.."
+    primary_domain: "ciris-services-1.ai"
+
+  tasks:
+    - name: "UP: Display cost warning"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          SPINNING UP TEST ENVIRONMENT
+          ============================================================
+          Cost: ~$42/month while running
+          - test-infra:    ~$12/mo (PostgreSQL + Lens)
+          - test-services: ~$24/mo (Billing + Proxy)
+          - test-scout:    ~$6/mo  (Manager + Agent)
+
+          To minimize cost, spin down when not in use:
+            ansible-playbook runbooks/test-env.yml --tags down
+          ============================================================
+
+    - name: "UP: Terraform init"
+      ansible.builtin.command:
+        cmd: terraform init
+        chdir: "{{ terraform_dir }}"
+      register: tf_init
+
+    - name: "UP: Terraform apply (create test environment)"
+      ansible.builtin.command:
+        cmd: terraform apply -var="create_test_env=true" -auto-approve
+        chdir: "{{ terraform_dir }}"
+      register: tf_apply
+
+    - name: "UP: Get terraform outputs"
+      ansible.builtin.command:
+        cmd: terraform output -json
+        chdir: "{{ terraform_dir }}"
+      register: tf_outputs
+
+    - name: "UP: Parse terraform outputs"
+      ansible.builtin.set_fact:
+        test_infra_ip: "{{ (tf_outputs.stdout | from_json).test_infra_ip.value }}"
+        test_services_ip: "{{ (tf_outputs.stdout | from_json).test_services_ip.value }}"
+        test_scout_ip: "{{ (tf_outputs.stdout | from_json).test_scout_ip.value }}"
+        test_infra_vpc_ip: "{{ (tf_outputs.stdout | from_json).test_infra_vpc_ip.value }}"
+        test_services_vpc_ip: "{{ (tf_outputs.stdout | from_json).test_services_vpc_ip.value }}"
+        test_scout_vpc_ip: "{{ (tf_outputs.stdout | from_json).test_scout_vpc_ip.value }}"
+
+    - name: "UP: Display IPs and DNS instructions"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          INFRASTRUCTURE PROVISIONED
+          ============================================================
+          Server IPs:
+            test-infra:    {{ test_infra_ip }} (VPC: {{ test_infra_vpc_ip }})
+            test-services: {{ test_services_ip }} (VPC: {{ test_services_vpc_ip }})
+            test-scout:    {{ test_scout_ip }} (VPC: {{ test_scout_vpc_ip }})
+
+          ADD THESE DNS RECORDS TO CLOUDFLARE ({{ primary_domain }}):
+            lens-test     A  {{ test_infra_ip }}
+            billing-test  A  {{ test_services_ip }}
+            proxy-test    A  {{ test_services_ip }}
+            scout-test    A  {{ test_scout_ip }}
+
+          SSH Access:
+            ssh root@{{ test_infra_ip }}
+            ssh root@{{ test_services_ip }}
+            ssh root@{{ test_scout_ip }}
+          ============================================================
+
+    - name: "UP: Wait for servers to boot"
+      ansible.builtin.pause:
+        seconds: 60
+        prompt: "Waiting 60s for servers to boot and SSH to be ready..."
+
+    - name: "UP: Update test inventory with IPs"
+      ansible.builtin.debug:
+        msg: |
+          Update ansible/inventory/test.yml with:
+
+          test-infra:
+            ansible_host: {{ test_infra_ip }}
+            internal_ip: {{ test_infra_vpc_ip }}
+
+          test-services:
+            ansible_host: {{ test_services_ip }}
+            internal_ip: {{ test_services_vpc_ip }}
+            infra_ip: {{ test_infra_vpc_ip }}
+
+          test-scout:
+            ansible_host: {{ test_scout_ip }}
+            internal_ip: {{ test_scout_vpc_ip }}
+            services_ip: {{ test_services_vpc_ip }}
+
+    - name: "UP: Create dynamic inventory file"
+      ansible.builtin.copy:
+        content: |
+          # Auto-generated test inventory - {{ ansible_date_time.iso8601 | default('now') }}
+          all:
+            children:
+              test_infra:
+                hosts:
+                  test-infra:
+                    ansible_host: {{ test_infra_ip }}
+                    internal_ip: {{ test_infra_vpc_ip }}
+                    deploy_postgres: true
+                    deploy_lens: true
+                    postgres_standalone: true
+
+              test_services:
+                hosts:
+                  test-services:
+                    ansible_host: {{ test_services_ip }}
+                    internal_ip: {{ test_services_vpc_ip }}
+                    postgres_host: {{ test_infra_vpc_ip }}
+                    deploy_billing: true
+                    deploy_proxy: true
+                    billing_test_auth_enabled: true
+
+              test_scout:
+                hosts:
+                  test-scout:
+                    ansible_host: {{ test_scout_ip }}
+                    internal_ip: {{ test_scout_vpc_ip }}
+                    deploy_manager: true
+
+            vars:
+              ansible_user: root
+              primary_domain: {{ primary_domain }}
+              environment: test
+              topology: standalone
+        dest: "{{ ansible_dir }}/inventory/test-dynamic.yml"
+        mode: '0644'
+
+    - name: "UP: Instructions for next steps"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          NEXT STEPS
+          ============================================================
+          1. Add DNS records to Cloudflare (see above)
+
+          2. Wait for DNS propagation (~2-5 minutes)
+
+          3. Deploy services:
+             ansible-playbook -i inventory/test-dynamic.yml playbooks/deploy-test-stack.yml \
+               --vault-password-file ~/.vault_pass
+
+          4. Verify deployment:
+             curl https://billing-test.{{ primary_domain }}/health
+             curl https://proxy-test.{{ primary_domain }}/health
+
+          5. Get test credentials:
+             ansible-playbook runbooks/test-env.yml --tags credentials \
+               --vault-password-file ~/.vault_pass
+          ============================================================
+
+# =============================================================================
+# SPIN DOWN - Destroy infrastructure
+# =============================================================================
+- name: "TEST ENV DOWN - Destroy Infrastructure"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [down, never]
+  vars:
+    terraform_dir: "{{ playbook_dir }}/../../terraform"
+
+  tasks:
+    - name: "DOWN: Confirm destruction"
+      ansible.builtin.pause:
+        prompt: |
+          ============================================================
+          WARNING: This will DESTROY all test environment resources!
+          ============================================================
+          - test-infra (PostgreSQL + Lens) - ALL DATA LOST
+          - test-services (Billing + Proxy)
+          - test-scout (Manager + Agent)
+
+          Press ENTER to continue or Ctrl+C to abort
+
+    - name: "DOWN: Terraform apply (destroy test environment)"
+      ansible.builtin.command:
+        cmd: terraform apply -var="create_test_env=false" -auto-approve
+        chdir: "{{ terraform_dir }}"
+      register: tf_destroy
+
+    - name: "DOWN: Display result"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          TEST ENVIRONMENT DESTROYED
+          ============================================================
+          All test resources have been removed.
+          Monthly cost: $0
+
+          Remove DNS records from Cloudflare:
+            - lens-test.ciris-services-1.ai
+            - billing-test.ciris-services-1.ai
+            - proxy-test.ciris-services-1.ai
+            - scout-test.ciris-services-1.ai
+
+          To spin up again:
+            ansible-playbook runbooks/test-env.yml --tags up
+          ============================================================
+
+# =============================================================================
+# STATUS - Check test environment health
+# =============================================================================
+- name: "TEST ENV STATUS - Health Check"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [status]
+  vars:
+    primary_domain: "ciris-services-1.ai"
+    test_endpoints:
+      - name: "Lens"
+        url: "https://lens-test.{{ primary_domain }}/health"
+      - name: "Billing"
+        url: "https://billing-test.{{ primary_domain }}/health"
+      - name: "Proxy"
+        url: "https://proxy-test.{{ primary_domain }}/health"
+
+  tasks:
+    - name: "STATUS: Check endpoint health"
+      ansible.builtin.uri:
+        url: "{{ item.url }}"
+        method: GET
+        timeout: 10
+        validate_certs: true
+        status_code: [200, 401, 403, 404, 502, 503]
+      loop: "{{ test_endpoints }}"
+      register: health_results
+      ignore_errors: true
+
+    - name: "STATUS: Display results"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          TEST ENVIRONMENT STATUS
+          ============================================================
+          {% for result in health_results.results %}
+          {{ result.item.name }}: {{ 'OK' if result.status == 200 else 'DOWN (' + (result.status | string) + ')' if result.status is defined else 'UNREACHABLE' }}
+            URL: {{ result.item.url }}
+          {% endfor %}
+
+          Telemetry Flow:
+            Scout Agent  ──┐
+            Proxy        ──┼──▶ lens-test.{{ primary_domain }}
+            Manager      ──┘
+
+          Covenant Metrics Adapter:
+            ciris-manager-client adapter load covenant_metrics --agent scout-test
+          ============================================================
+
+# =============================================================================
+# CREDENTIALS - Display test credentials
+# =============================================================================
+- name: "TEST ENV CREDENTIALS - Display Test Auth Info"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [credentials, never]
+  vars:
+    primary_domain: "ciris-services-1.ai"
+
+  tasks:
+    - name: "CREDENTIALS: Display test credentials"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          TEST CREDENTIALS
+          ============================================================
+          Test Auth Token: {{ vault_test_auth_token | default('<set in vault>') }}
+          Test User ID:    ciris_test_canary
+          OAuth Provider:  oauth:test
+
+          Example curl request:
+            curl -X POST https://billing-test.{{ primary_domain }}/v1/billing/credits/check \
+              -H "Authorization: Bearer {{ vault_test_auth_token | default('<TOKEN>') }}" \
+              -H "Content-Type: application/json" \
+              -d '{"oauth_provider": "oauth:test", "external_id": "ciris_test_canary"}'
+
+          Example proxy request:
+            curl -X POST https://proxy-test.{{ primary_domain }}/v1/chat/completions \
+              -H "Authorization: Bearer {{ vault_test_auth_token | default('<TOKEN>') }}" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "model": "groq/llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": "Hello, test!"}]
+              }'
+          ============================================================
+
+# =============================================================================
+# TEST - Run end-to-end test
+# =============================================================================
+- name: "TEST ENV E2E - Run End-to-End Test"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [test, never]
+  vars:
+    primary_domain: "ciris-services-1.ai"
+    billing_url: "https://billing-test.{{ primary_domain }}"
+    proxy_url: "https://proxy-test.{{ primary_domain }}"
+    lens_url: "https://lens-test.{{ primary_domain }}"
+    manager_url: "https://scout-test.{{ primary_domain }}"
+
+  tasks:
+    - name: "E2E: Check billing health"
+      ansible.builtin.uri:
+        url: "{{ billing_url }}/health"
+        method: GET
+        timeout: 10
+      register: billing_health
+
+    - name: "E2E: Check proxy health"
+      ansible.builtin.uri:
+        url: "{{ proxy_url }}/health"
+        method: GET
+        timeout: 10
+      register: proxy_health
+      ignore_errors: true
+
+    - name: "E2E: Check lens health"
+      ansible.builtin.uri:
+        url: "{{ lens_url }}/health"
+        method: GET
+        timeout: 10
+      register: lens_health
+      ignore_errors: true
+
+    - name: "E2E: Check credits (test auth)"
+      ansible.builtin.uri:
+        url: "{{ billing_url }}/v1/billing/credits/check"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ vault_test_auth_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          oauth_provider: "oauth:test"
+          external_id: "ciris_test_canary"
+        timeout: 10
+      register: credit_check
+
+    - name: "E2E: Display credit check result"
+      ansible.builtin.debug:
+        msg: |
+          Credit Check Result:
+          {{ credit_check.json | to_nice_json }}
+
+    - name: "E2E: Make LLM request through proxy"
+      ansible.builtin.uri:
+        url: "{{ proxy_url }}/v1/chat/completions"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ vault_test_auth_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          model: "groq/llama-3.3-70b-versatile"
+          messages:
+            - role: "user"
+              content: "Say 'Test successful!' and nothing else."
+          max_tokens: 20
+        timeout: 30
+      register: llm_response
+      ignore_errors: true
+
+    - name: "E2E: Display LLM response"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          END-TO-END TEST RESULTS
+          ============================================================
+          Service Health:
+            Billing: {{ 'OK' if billing_health.status == 200 else 'FAILED' }}
+            Proxy:   {{ 'OK' if proxy_health.status is defined and proxy_health.status == 200 else 'FAILED' }}
+            Lens:    {{ 'OK' if lens_health.status is defined and lens_health.status == 200 else 'FAILED' }}
+
+          Test Auth:
+            Credit Check: {{ 'OK' if credit_check.status == 200 else 'FAILED' }}
+
+          LLM Request:
+            Status: {{ 'OK' if llm_response.status is defined and llm_response.status == 200 else 'FAILED' }}
+          {% if llm_response.json is defined %}
+            Response: {{ llm_response.json.choices[0].message.content | default('No content') }}
+          {% endif %}
+
+          Telemetry:
+            Check traces at: {{ lens_url }}
+            Grafana: {{ lens_url | replace('/lens-api', '') }}
+
+          Test User: ciris_test_canary
+
+          Next: Deploy scout agent with covenant metrics:
+            ansible-playbook runbooks/test-env.yml --tags deploy-scout
+          ============================================================
+
+# =============================================================================
+# DEPLOY-SCOUT - Deploy scout agent with covenant metrics adapter
+# =============================================================================
+- name: "TEST ENV DEPLOY-SCOUT - Deploy Scout Agent"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [deploy-scout, never]
+  vars:
+    primary_domain: "ciris-services-1.ai"
+    manager_url: "https://scout-test.{{ primary_domain }}"
+    lens_endpoint: "https://lens-test.{{ primary_domain }}/lens-api/api/v1/logs/ingest"
+
+  tasks:
+    - name: "SCOUT: Display deployment instructions"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          DEPLOYING SCOUT AGENT WITH COVENANT METRICS
+          ============================================================
+
+          Run this on the test-scout server:
+
+          # 1. SSH to test-scout and activate environment
+          ssh root@<test-scout-ip>
+          source /opt/ciris-manager/venv/bin/activate
+
+          # 2. Get dev token (localhost only - CIRIS_DEV_MODE=true required)
+          ciris-manager-client auth dev-token
+
+          # 3. Create agent
+          ciris-manager-client --api-url {{ manager_url }} agent create \
+            --name test-scout \
+            --template scout \
+            --server local \
+            --env CIRIS_LENS_ENDPOINT={{ lens_endpoint }} \
+            --env CIRIS_LENS_AUTH_TOKEN={{ vault_test_cirislens_token | default('<TOKEN>') }} \
+            --env CIRIS_USER_ID=ciris_test_canary \
+            --env CIRIS_TRACE_LEVEL=full \
+            --billing-enabled \
+            --billing-api-key "{{ vault_test_auth_token | default('<TOKEN>') }}"
+
+          # 4. Get agent ID from output, then load adapter
+          AGENT_ID=<from-output>
+          ciris-manager-client --api-url {{ manager_url }} adapter load $AGENT_ID ciris_covenant_metrics \
+            --config-file /etc/ciris-manager/covenant_metrics_config.json
+
+          # 5. Verify
+          ciris-manager-client --api-url {{ manager_url }} adapter list $AGENT_ID
+          ciris-manager-client --api-url {{ manager_url }} agent access $AGENT_ID
+
+          # 6. Check traces flowing to lens
+          curl -H "Authorization: Bearer {{ vault_test_cirislens_token | default('<TOKEN>') }}" \
+            "{{ lens_endpoint | replace('/logs/ingest', '') }}/agents/$AGENT_ID/traces?limit=10"
+          ============================================================
+
+    - name: "SCOUT: Or run automated deployment"
+      ansible.builtin.debug:
+        msg: |
+          Alternatively, run the Ansible playbook:
+
+          ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml \
+            --tags scout-agent --vault-password-file ~/.vault_pass

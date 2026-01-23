@@ -1,0 +1,30 @@
+# CIRISManager Ansible Role Defaults
+
+# Manager settings
+manager_port: 8090
+manager_install_dir: /opt/ciris-manager
+manager_config_dir: /etc/ciris-manager
+manager_data_dir: /var/lib/ciris-manager
+manager_log_dir: /var/log/ciris-manager
+
+# Git repository
+manager_repo: https://github.com/CIRISAI/CIRISManager.git
+manager_version: main
+
+# Python version
+python_version: "3.11"
+
+# Service configuration
+manager_service_name: ciris-manager
+manager_user: root
+
+# API settings
+manager_api_host: "0.0.0.0"
+manager_api_port: 8090
+
+# Test environment connections (override in inventory)
+billing_api_url: "https://billing-test.{{ primary_domain }}"
+proxy_api_url: "https://proxy-test.{{ primary_domain }}"
+
+# Agent defaults
+default_agent_template: basic

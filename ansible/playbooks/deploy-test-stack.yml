@@ -1,0 +1,258 @@
+# CIRISBridge Test Stack Deployment
+# Full end-to-end test environment with spin up/down capability
+#
+# Architecture:
+#   test-infra:    PostgreSQL + CIRISLens (observability)
+#   test-services: CIRISBilling (test auth) + CIRISProxy
+#   test-scout:    CIRISManager + CIRIS Agent (deployed separately)
+#
+# Usage:
+#   # Deploy infrastructure services (postgres, lens)
+#   ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml --tags infra
+#
+#   # Deploy application services (billing, proxy)
+#   ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml --tags services
+#
+#   # Deploy everything except scout (manager/agent configured separately)
+#   ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml
+#
+#   # Verify deployment
+#   ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml --tags verify
+
+---
+# =============================================================================
+# Phase 1: Common Setup (All Nodes)
+# =============================================================================
+- name: Common setup for all test nodes
+  hosts: all
+  become: true
+  tags: [common, infra, services]
+  roles:
+    - common
+
+# =============================================================================
+# Phase 2: Infrastructure Node (test-infra)
+# =============================================================================
+- name: Deploy PostgreSQL on test-infra
+  hosts: test_infra
+  become: true
+  tags: [infra, postgres]
+  roles:
+    - role: postgres
+      vars:
+        postgres_standalone: true
+
+- name: Deploy Caddy TLS on test-infra
+  hosts: test_infra
+  become: true
+  tags: [infra, caddy]
+  roles:
+    - role: caddy
+      vars:
+        caddy_domains:
+          - "lens-test.{{ primary_domain }}"
+
+- name: Deploy CIRISLens on test-infra
+  hosts: test_infra
+  become: true
+  tags: [infra, lens]
+  roles:
+    - lens
+
+# =============================================================================
+# Phase 3: Services Node (test-services)
+# =============================================================================
+- name: Deploy Caddy TLS on test-services
+  hosts: test_services
+  become: true
+  tags: [services, caddy]
+  roles:
+    - role: caddy
+      vars:
+        caddy_domains:
+          - "billing-test.{{ primary_domain }}"
+          - "proxy-test.{{ primary_domain }}"
+
+- name: Deploy CIRISBilling on test-services
+  hosts: test_services
+  become: true
+  tags: [services, billing]
+  roles:
+    - role: billing
+      vars:
+        billing_test_auth_enabled: true
+
+- name: Deploy CIRISProxy on test-services
+  hosts: test_services
+  become: true
+  tags: [services, proxy]
+  roles:
+    - proxy
+
+# =============================================================================
+# Phase 4: Scout Node (test-scout) - Placeholder for manager config
+# =============================================================================
+- name: Deploy Caddy TLS on test-scout
+  hosts: test_scout
+  become: true
+  tags: [scout, caddy]
+  roles:
+    - role: caddy
+      vars:
+        caddy_domains:
+          - "scout-test.{{ primary_domain }}"
+
+# Deploy CIRISManager for agent orchestration
+- name: Deploy CIRISManager on test-scout
+  hosts: test_scout
+  become: true
+  tags: [scout, manager]
+  roles:
+    - role: cirismanager
+      vars:
+        billing_api_url: "https://billing-test.{{ primary_domain }}"
+        proxy_api_url: "https://proxy-test.{{ primary_domain }}"
+        test_auth_token: "{{ vault_test_auth_token }}"
+        test_user_id: "ciris_test_canary"
+        billing_test_auth_enabled: true
+
+- name: Deploy Scout Agent with Covenant Metrics
+  hosts: test_scout
+  become: true
+  tags: [scout-agent, never]
+  tasks:
+    - name: Include scout deployment tasks
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../roles/cirismanager/tasks/deploy-scout.yml"
+
+- name: Display scout setup instructions
+  hosts: test_scout
+  become: true
+  tags: [scout, manager]
+  tasks:
+    - name: Display agent deployment instructions
+      ansible.builtin.debug:
+        msg: |
+          CIRISManager deployed on test-scout!
+
+          === Option 1: Automated Deployment ===
+            ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml \
+              --tags scout-agent --vault-password-file ~/.vault_pass
+
+          === Option 2: Manual Deployment ===
+            export CIRIS_MANAGER_API_URL=https://scout-test.{{ primary_domain }}
+            source /opt/ciris-manager/venv/bin/activate
+
+            # Create agent with billing and lens integration
+            ciris-manager-client agent create \
+              --name test-scout \
+              --template scout \
+              --server local \
+              --env CIRIS_LENS_ENDPOINT=https://lens-test.{{ primary_domain }}/lens-api/api/v1/logs/ingest \
+              --env CIRIS_LENS_AUTH_TOKEN={{ vault_test_cirislens_token | default('<TOKEN>') }} \
+              --env CIRIS_USER_ID=ciris_test_canary \
+              --env CIRIS_TRACE_LEVEL=full \
+              --billing-enabled \
+              --billing-api-key "{{ vault_test_auth_token | default('<TOKEN>') }}"
+
+            # Get the agent ID from output, then load adapter
+            ciris-manager-client adapter load <AGENT_ID> ciris_covenant_metrics \
+              --config-file /etc/ciris-manager/covenant_metrics_config.json
+
+            # Verify
+            ciris-manager-client adapter list <AGENT_ID>
+            ciris-manager-client agent access <AGENT_ID>
+
+          === Verify Traces Flowing to Lens ===
+            curl -H "Authorization: Bearer <TOKEN>" \
+              "https://lens-test.{{ primary_domain }}/lens-api/api/v1/agents/<AGENT_ID>/traces?limit=10"
+
+          Test Auth Credentials:
+            Token: {{ vault_test_auth_token | default('<in vault>') }}
+            User ID: ciris_test_canary
+
+          Telemetry flows to:
+            Lens: https://lens-test.{{ primary_domain }}
+
+# =============================================================================
+# Phase 5: Verification
+# =============================================================================
+- name: Verify test stack deployment
+  hosts: localhost
+  connection: local
+  tags: [verify]
+  vars:
+    test_domains:
+      - "lens-test.{{ primary_domain }}"
+      - "billing-test.{{ primary_domain }}"
+      - "proxy-test.{{ primary_domain }}"
+
+  tasks:
+    - name: Wait for services to be ready
+      ansible.builtin.pause:
+        seconds: 30
+        prompt: "Waiting for services to initialize..."
+      when: false  # Skip by default, DNS needs time
+
+    - name: Check service health endpoints
+      ansible.builtin.uri:
+        url: "https://{{ item }}/health"
+        status_code: [200, 401, 403]  # Some services may require auth
+        timeout: 10
+        validate_certs: true
+      loop: "{{ test_domains }}"
+      register: health_checks
+      ignore_errors: true
+
+    - name: Display test environment info
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          TEST ENVIRONMENT DEPLOYED
+          ============================================================
+
+          Endpoints:
+            Lens:    https://lens-test.{{ primary_domain }}
+            Billing: https://billing-test.{{ primary_domain }}
+            Proxy:   https://proxy-test.{{ primary_domain }}
+            Scout:   https://scout-test.{{ primary_domain }} (pending manager config)
+
+          Test Credentials:
+            Token:   {{ vault_test_auth_token | default('<in vault>') }}
+            User ID: ciris_test_canary
+
+          Test Request:
+            curl -X POST https://billing-test.{{ primary_domain }}/v1/billing/credits/check \
+              -H "Authorization: Bearer <TEST_TOKEN>" \
+              -H "Content-Type: application/json" \
+              -d '{"oauth_provider": "oauth:test", "external_id": "ciris_test_canary"}'
+
+          Next Steps:
+            1. Deploy CIRISManager to test-scout
+            2. Configure scout agent via manager
+            3. Run end-to-end test
+
+          Spin Down:
+            cd terraform && terraform apply -var="create_test_env=false"
+          ============================================================
+
+# =============================================================================
+# Optional: Database Initialization
+# =============================================================================
+- name: Initialize test databases
+  hosts: test_infra
+  become: true
+  tags: [init-db, never]
+  tasks:
+    - name: Create test billing database
+      community.docker.docker_container_exec:
+        container: ciris-postgres
+        command: >
+          psql -U postgres -c "CREATE DATABASE ciris_billing_test;"
+      ignore_errors: true
+
+    - name: Create test lens database
+      community.docker.docker_container_exec:
+        container: ciris-postgres
+        command: >
+          psql -U postgres -c "CREATE DATABASE cirislens_test;"
+      ignore_errors: true

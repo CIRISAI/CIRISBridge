@@ -109,3 +109,19 @@ variable "secondary_domain" {
   type        = string
   default     = "ciris-services-2.ai"
 }
+
+# =============================================================================
+# Test Environment Configuration
+# =============================================================================
+
+variable "create_test_env" {
+  description = "Create test environment (VPC + isolated server)"
+  type        = bool
+  default     = false
+}
+
+variable "test_vultr_plan" {
+  description = "Vultr plan for test instance (minimal)"
+  type        = string
+  default     = "vc2-1c-1gb"  # 1 vCPU, 1GB RAM - ~$6/mo
+}
