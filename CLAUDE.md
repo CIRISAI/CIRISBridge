@@ -106,9 +106,6 @@ Complete test stack with spin up/down capability for end-to-end testing.
 
 **Spin Up/Down (Single Command):**
 ```bash
-# Set Cloudflare API token (required for DNS management)
-export CLOUDFLARE_API_TOKEN=xxx
-
 # Spin UP (~$42/month when running)
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up
 
@@ -122,6 +119,8 @@ ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags status
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test
 ```
+
+Note: Cloudflare API token is loaded from `inventory/production.yml` vault.
 
 **Manual Provisioning:**
 ```bash
@@ -264,12 +263,11 @@ ansible all -i inventory/production.yml -m shell -a 'docker logs ciris-billing -
 ansible all -i inventory/production.yml -m shell -a 'systemctl list-timers | grep ciris'
 
 # Test Environment (spin up/down full e2e stack)
-# Requires: export CLOUDFLARE_API_TOKEN=xxx
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up       # Spin up (~$42/mo)
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down     # Spin down ($0/mo)
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags status   # Health check
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up         # Spin up (~$42/mo)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down       # Spin down ($0/mo)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags status     # Health check
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e  # Create API key + agent
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test     # E2E test through agent
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test       # E2E test through agent
 ```
 
 ## Billing Update Lifecycle

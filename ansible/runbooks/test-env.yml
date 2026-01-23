@@ -30,17 +30,13 @@
     terraform_dir: "{{ playbook_dir }}/../../terraform"
     ansible_dir: "{{ playbook_dir }}/.."
     primary_domain: "ciris-services-1.ai"
-    cloudflare_zone_id: "90a04d01f9094c64d5674c7a779443e0"
-    # Cloudflare API token from environment variable (set via: export CLOUDFLARE_API_TOKEN=xxx)
-    vault_cloudflare_api_token: "{{ lookup('env', 'CLOUDFLARE_API_TOKEN') }}"
+    # Cloudflare credentials loaded from inventory/production.yml vault
 
   tasks:
-    - name: "UP: Verify Cloudflare API token is set"
-      ansible.builtin.assert:
-        that:
-          - vault_cloudflare_api_token | length > 0
-        fail_msg: "CLOUDFLARE_API_TOKEN environment variable must be set. Export it before running."
-        quiet: true
+    - name: "UP: Load Cloudflare credentials from vault"
+      ansible.builtin.include_vars:
+        file: "{{ ansible_dir }}/inventory/production.yml"
+      no_log: true
 
     - name: "UP: Display cost warning"
       ansible.builtin.debug:
@@ -318,18 +314,15 @@
   tags: [down, never]
   vars:
     terraform_dir: "{{ playbook_dir }}/../../terraform"
+    ansible_dir: "{{ playbook_dir }}/.."
     primary_domain: "ciris-services-1.ai"
-    cloudflare_zone_id: "90a04d01f9094c64d5674c7a779443e0"
-    # Cloudflare API token from environment variable (set via: export CLOUDFLARE_API_TOKEN=xxx)
-    vault_cloudflare_api_token: "{{ lookup('env', 'CLOUDFLARE_API_TOKEN') }}"
+    # Cloudflare credentials loaded from inventory/production.yml vault
 
   tasks:
-    - name: "DOWN: Verify Cloudflare API token is set"
-      ansible.builtin.assert:
-        that:
-          - vault_cloudflare_api_token | length > 0
-        fail_msg: "CLOUDFLARE_API_TOKEN environment variable must be set. Export it before running."
-        quiet: true
+    - name: "DOWN: Load Cloudflare credentials from vault"
+      ansible.builtin.include_vars:
+        file: "{{ ansible_dir }}/inventory/production.yml"
+      no_log: true
 
     - name: "DOWN: Confirm destruction"
       ansible.builtin.pause:
