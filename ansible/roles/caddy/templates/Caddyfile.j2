@@ -72,6 +72,12 @@ agents.{{ dns_soa }} {
 {% if inventory_hostname == 'vultr' %}
 # CIRISLens - Observability (US node only)
 lens.{{ dns_soa }} {
+    # Public covenant repository endpoints (no auth required)
+    # Allows anonymous access to agent traces and statistics
+    handle /api/v1/covenant/repository/* {
+        reverse_proxy cirislens-api:8000
+    }
+
     # CIRISLens API routes (log ingestion, admin) - specific paths only
     handle /ingest/* {
         reverse_proxy cirislens-api:8000

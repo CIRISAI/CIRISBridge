@@ -9,3 +9,8 @@
   ansible.builtin.systemd:
     name: "{{ manager_service_name }}"
     state: restarted
+
+- name: Restart nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: restarted

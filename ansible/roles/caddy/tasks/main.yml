@@ -15,12 +15,21 @@
     - /opt/ciris/caddy/data
     - /opt/ciris/caddy/config
 
-- name: Copy Caddyfile
+- name: Copy Caddyfile (production)
   ansible.builtin.template:
     src: Caddyfile.j2
     dest: /opt/ciris/caddy/Caddyfile
     mode: "0644"
   notify: Restart Caddy
+  when: ciris_environment | default('production') != 'test'
+
+- name: Copy Caddyfile (test)
+  ansible.builtin.template:
+    src: Caddyfile-test.j2
+    dest: /opt/ciris/caddy/Caddyfile
+    mode: "0644"
+  notify: Restart Caddy
+  when: ciris_environment | default('production') == 'test'
 
 - name: Start Caddy
   community.docker.docker_compose_v2:

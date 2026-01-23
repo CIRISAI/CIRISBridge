@@ -64,13 +64,13 @@
   until: health_result.status == 200
 
 # =============================================================================
-# MIGRATE: Run database migrations (US node only)
+# MIGRATE: Run database migrations (US node or test environment)
 # =============================================================================
-- name: Run database migrations (US node only to avoid conflicts)
+- name: Run database migrations (US node or test environment)
   community.docker.docker_container_exec:
     container: ciris-billing
     command: alembic upgrade head
-  when: node_name == "us"
+  when: node_name == "us" or ciris_environment | default('production') == "test"
   register: migration_result
 
 # =============================================================================

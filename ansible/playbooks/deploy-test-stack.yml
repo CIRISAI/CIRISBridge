@@ -32,6 +32,7 @@
 
 # =============================================================================
 # Phase 2: Infrastructure Node (test-infra)
+# NOTE: Lens MUST deploy before Caddy (creates docker network that Caddy joins)
 # =============================================================================
 - name: Deploy PostgreSQL on test-infra
   hosts: test_infra
@@ -41,6 +42,13 @@
     - role: postgres
       vars:
         postgres_standalone: true
+
+- name: Deploy CIRISLens on test-infra
+  hosts: test_infra
+  become: true
+  tags: [infra, lens]
+  roles:
+    - lens
 
 - name: Deploy Caddy TLS on test-infra
   hosts: test_infra
@@ -52,16 +60,28 @@
         caddy_domains:
           - "lens-test.{{ primary_domain }}"
 
-- name: Deploy CIRISLens on test-infra
-  hosts: test_infra
-  become: true
-  tags: [infra, lens]
-  roles:
-    - lens
-
 # =============================================================================
 # Phase 3: Services Node (test-services)
+# NOTE: Billing MUST deploy before Caddy (creates docker network that Caddy joins)
 # =============================================================================
+- name: Deploy CIRISBilling on test-services
+  hosts: test_services
+  become: true
+  tags: [services, billing]
+  roles:
+    - role: billing
+      vars:
+        billing_test_auth_enabled: true
+        # Run migrations on test-services (standalone test env)
+        run_migrations: true
+
+- name: Deploy CIRISProxy on test-services
+  hosts: test_services
+  become: true
+  tags: [services, proxy]
+  roles:
+    - proxy
+
 - name: Deploy Caddy TLS on test-services
   hosts: test_services
   become: true
@@ -72,22 +92,6 @@
         caddy_domains:
           - "billing-test.{{ primary_domain }}"
           - "proxy-test.{{ primary_domain }}"
-
-- name: Deploy CIRISBilling on test-services
-  hosts: test_services
-  become: true
-  tags: [services, billing]
-  roles:
-    - role: billing
-      vars:
-        billing_test_auth_enabled: true
-
-- name: Deploy CIRISProxy on test-services
-  hosts: test_services
-  become: true
-  tags: [services, proxy]
-  roles:
-    - proxy
 
 # =============================================================================
 # Phase 4: Scout Node (test-scout) - Placeholder for manager config

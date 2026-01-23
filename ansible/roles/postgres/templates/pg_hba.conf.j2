@@ -16,6 +16,13 @@ host    all             all             ::1/128                 scram-sha-256
 # =============================================================================
 host    all             all             172.16.0.0/12           scram-sha-256
 
+{% if postgres_standalone | default(false) %}
+# =============================================================================
+# VPC network (test environment - standalone postgres)
+# =============================================================================
+host    all             all             10.0.0.0/24             scram-sha-256
+{% endif %}
+
 # =============================================================================
 # Bi-Directional Logical Replication (Active/Active)
 # Both nodes can replicate to/from each other

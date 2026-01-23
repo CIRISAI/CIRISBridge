@@ -92,6 +92,26 @@
     state: started
     enabled: true
 
+- name: Create Docker config directory
+  ansible.builtin.file:
+    path: /root/.docker
+    state: directory
+    mode: "0700"
+
+- name: Configure GHCR authentication
+  ansible.builtin.copy:
+    dest: /root/.docker/config.json
+    content: |
+      {
+        "auths": {
+          "ghcr.io": {
+            "auth": "{{ ghcr_auth_token }}"
+          }
+        }
+      }
+    mode: "0600"
+  when: ghcr_auth_token is defined
+
 - name: Create CIRIS directories
   ansible.builtin.file:
     path: "{{ item }}"

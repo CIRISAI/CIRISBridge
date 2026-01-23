@@ -42,8 +42,13 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: {{ lens_grafana_admin_password }}
       GF_SECURITY_SECRET_KEY: {{ lens_grafana_secret_key }}
       # Server configuration
+{% if ciris_environment | default('production') == 'test' %}
+      GF_SERVER_ROOT_URL: https://lens-test.{{ primary_domain }}
+      GF_SERVER_DOMAIN: lens-test.{{ primary_domain }}
+{% else %}
       GF_SERVER_ROOT_URL: https://lens.{{ primary_domain }}
       GF_SERVER_DOMAIN: lens.{{ primary_domain }}
+{% endif %}
       # Database (use TimescaleDB instead of SQLite)
       GF_DATABASE_TYPE: postgres
       GF_DATABASE_HOST: postgres:5432
@@ -96,13 +101,27 @@ services:
       # OAuth for admin UI
       GOOGLE_CLIENT_ID: {{ google_client_id | default('') }}
       GOOGLE_CLIENT_SECRET: {{ google_client_secret | default('') }}
+{% if ciris_environment | default('production') == 'test' %}
+      OAUTH_CALLBACK_URL: https://lens-test.{{ primary_domain }}/api/admin/auth/callback
+{% else %}
       OAUTH_CALLBACK_URL: https://lens.{{ primary_domain }}/api/admin/auth/callback
+{% endif %}
       ALLOWED_DOMAIN: {{ lens_allowed_domain | default('ciris.ai') }}
       SESSION_SECRET: {{ lens_session_secret }}
       # Collection settings
       COLLECTION_INTERVAL_SECONDS: {{ lens_collection_interval | default(30) }}
       OTLP_COLLECTION_ENABLED: false
       # Status collector (multi-region monitoring)
+{% if ciris_environment | default('production') == 'test' %}
+      # Test environment - single region
+      US_BILLING_URL: https://billing-test.{{ primary_domain }}
+      US_PROXY_URL: https://proxy-test.{{ primary_domain }}
+      EU_BILLING_URL: ""
+      EU_PROXY_URL: ""
+      # Infrastructure health checks
+      VULTR_HEALTH_URL: https://billing-test.{{ primary_domain }}/health
+      HETZNER_HEALTH_URL: ""
+{% else %}
       # US Region (Vultr Chicago) - internal for local, external for cross-region
       US_BILLING_URL: https://billing1.{{ primary_domain }}
       US_PROXY_URL: https://proxy1.{{ primary_domain }}
@@ -112,13 +131,16 @@ services:
       # Infrastructure health checks
       VULTR_HEALTH_URL: https://billing1.{{ primary_domain }}/health
       HETZNER_HEALTH_URL: https://billing1.{{ secondary_domain }}/health
+{% endif %}
       GHCR_HEALTH_URL: https://ghcr.io/v2/
       GRAFANA_URL: http://grafana:3000
       # External service health checks
       EXA_HEALTH_URL: https://api.exa.ai/health
+      # Scrub signing key for tamper-evident PII removal
+      CIRISLENS_SCRUB_KEY_PATH: /app/keys/scrub_private.key
     volumes:
       - /var/log/ciris/lens:/app/logs
-      - ./sql:/app/sql:ro
+      - /opt/ciris/lens/keys:/app/keys:ro
     ports:
       - "127.0.0.1:8200:8000"
     networks:

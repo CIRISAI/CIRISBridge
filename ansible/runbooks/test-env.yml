@@ -30,8 +30,18 @@
     terraform_dir: "{{ playbook_dir }}/../../terraform"
     ansible_dir: "{{ playbook_dir }}/.."
     primary_domain: "ciris-services-1.ai"
+    cloudflare_zone_id: "90a04d01f9094c64d5674c7a779443e0"
+    # Cloudflare API token from environment variable (set via: export CLOUDFLARE_API_TOKEN=xxx)
+    vault_cloudflare_api_token: "{{ lookup('env', 'CLOUDFLARE_API_TOKEN') }}"
 
   tasks:
+    - name: "UP: Verify Cloudflare API token is set"
+      ansible.builtin.assert:
+        that:
+          - vault_cloudflare_api_token | length > 0
+        fail_msg: "CLOUDFLARE_API_TOKEN environment variable must be set. Export it before running."
+        quiet: true
+
     - name: "UP: Display cost warning"
       ansible.builtin.debug:
         msg: |
@@ -102,24 +112,138 @@
         seconds: 60
         prompt: "Waiting 60s for servers to boot and SSH to be ready..."
 
-    - name: "UP: Update test inventory with IPs"
+    - name: "UP: Create DNS records (Cloudflare)"
+      block:
+        - name: "UP: Create lens-test DNS record"
+          ansible.builtin.uri:
+            url: "https://api.cloudflare.com/client/v4/zones/{{ cloudflare_zone_id }}/dns_records"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ vault_cloudflare_api_token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              type: "A"
+              name: "lens-test"
+              content: "{{ test_infra_ip }}"
+              ttl: 300
+              proxied: true
+            status_code: [200, 409]
+          register: dns_lens
+          ignore_errors: true
+
+        - name: "UP: Create billing-test DNS record"
+          ansible.builtin.uri:
+            url: "https://api.cloudflare.com/client/v4/zones/{{ cloudflare_zone_id }}/dns_records"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ vault_cloudflare_api_token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              type: "A"
+              name: "billing-test"
+              content: "{{ test_services_ip }}"
+              ttl: 300
+              proxied: true
+            status_code: [200, 409]
+          register: dns_billing
+          ignore_errors: true
+
+        - name: "UP: Create proxy-test DNS record"
+          ansible.builtin.uri:
+            url: "https://api.cloudflare.com/client/v4/zones/{{ cloudflare_zone_id }}/dns_records"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ vault_cloudflare_api_token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              type: "A"
+              name: "proxy-test"
+              content: "{{ test_services_ip }}"
+              ttl: 300
+              proxied: true
+            status_code: [200, 409]
+          register: dns_proxy
+          ignore_errors: true
+
+        - name: "UP: Create scout-test DNS record"
+          ansible.builtin.uri:
+            url: "https://api.cloudflare.com/client/v4/zones/{{ cloudflare_zone_id }}/dns_records"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ vault_cloudflare_api_token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              type: "A"
+              name: "scout-test"
+              content: "{{ test_scout_ip }}"
+              ttl: 300
+              proxied: true
+            status_code: [200, 409]
+          register: dns_scout
+          ignore_errors: true
+
+        - name: "UP: DNS records created"
+          ansible.builtin.debug:
+            msg: |
+              DNS records created automatically via Cloudflare API:
+                lens-test.{{ primary_domain }}    → {{ test_infra_ip }}
+                billing-test.{{ primary_domain }} → {{ test_services_ip }}
+                proxy-test.{{ primary_domain }}   → {{ test_services_ip }}
+                scout-test.{{ primary_domain }}   → {{ test_scout_ip }}
+
+    - name: "UP: Update test-infra ansible_host in inventory"
+      ansible.builtin.replace:
+        path: "{{ ansible_dir }}/inventory/test.yml"
+        regexp: '(test-infra:\s+ansible_host:)\s+[\d.]+'
+        replace: '\1 {{ test_infra_ip }}'
+
+    - name: "UP: Update test-infra internal_ip in inventory"
+      ansible.builtin.replace:
+        path: "{{ ansible_dir }}/inventory/test.yml"
+        regexp: '(test_infra:[\s\S]*?internal_ip:)\s+[\d.]+'
+        replace: '\1 {{ test_infra_vpc_ip }}'
+
+    - name: "UP: Update test-services ansible_host in inventory"
+      ansible.builtin.replace:
+        path: "{{ ansible_dir }}/inventory/test.yml"
+        regexp: '(test-services:\s+ansible_host:)\s+[\d.]+'
+        replace: '\1 {{ test_services_ip }}'
+
+    - name: "UP: Update test-services internal_ip in inventory"
+      ansible.builtin.replace:
+        path: "{{ ansible_dir }}/inventory/test.yml"
+        regexp: '(test_services:[\s\S]*?internal_ip:)\s+[\d.]+'
+        replace: '\1 {{ test_services_vpc_ip }}'
+
+    - name: "UP: Update postgres_host in inventory"
+      ansible.builtin.replace:
+        path: "{{ ansible_dir }}/inventory/test.yml"
+        regexp: '(postgres_host:)\s+[\d.]+'
+        replace: '\1 {{ test_infra_vpc_ip }}'
+
+    - name: "UP: Update test-scout ansible_host in inventory"
+      ansible.builtin.replace:
+        path: "{{ ansible_dir }}/inventory/test.yml"
+        regexp: '(test-scout:\s+ansible_host:)\s+[\d.]+'
+        replace: '\1 {{ test_scout_ip }}'
+
+    - name: "UP: Update test-scout internal_ip in inventory"
+      ansible.builtin.replace:
+        path: "{{ ansible_dir }}/inventory/test.yml"
+        regexp: '(test_scout:[\s\S]*?internal_ip:)\s+[\d.]+'
+        replace: '\1 {{ test_scout_vpc_ip }}'
+
+    - name: "UP: Display updated IPs"
       ansible.builtin.debug:
         msg: |
-          Update ansible/inventory/test.yml with:
-
-          test-infra:
-            ansible_host: {{ test_infra_ip }}
-            internal_ip: {{ test_infra_vpc_ip }}
-
-          test-services:
-            ansible_host: {{ test_services_ip }}
-            internal_ip: {{ test_services_vpc_ip }}
-            infra_ip: {{ test_infra_vpc_ip }}
-
-          test-scout:
-            ansible_host: {{ test_scout_ip }}
-            internal_ip: {{ test_scout_vpc_ip }}
-            services_ip: {{ test_services_vpc_ip }}
+          Updated inventory/test.yml with:
+            test-infra:    {{ test_infra_ip }} (VPC: {{ test_infra_vpc_ip }})
+            test-services: {{ test_services_ip }} (VPC: {{ test_services_vpc_ip }})
+            test-scout:    {{ test_scout_ip }} (VPC: {{ test_scout_vpc_ip }})
 
     - name: "UP: Create dynamic inventory file"
       ansible.builtin.copy:
@@ -194,8 +318,19 @@
   tags: [down, never]
   vars:
     terraform_dir: "{{ playbook_dir }}/../../terraform"
+    primary_domain: "ciris-services-1.ai"
+    cloudflare_zone_id: "90a04d01f9094c64d5674c7a779443e0"
+    # Cloudflare API token from environment variable (set via: export CLOUDFLARE_API_TOKEN=xxx)
+    vault_cloudflare_api_token: "{{ lookup('env', 'CLOUDFLARE_API_TOKEN') }}"
 
   tasks:
+    - name: "DOWN: Verify Cloudflare API token is set"
+      ansible.builtin.assert:
+        that:
+          - vault_cloudflare_api_token | length > 0
+        fail_msg: "CLOUDFLARE_API_TOKEN environment variable must be set. Export it before running."
+        quiet: true
+
     - name: "DOWN: Confirm destruction"
       ansible.builtin.pause:
         prompt: |
@@ -207,6 +342,38 @@
           - test-scout (Manager + Agent)
 
           Press ENTER to continue or Ctrl+C to abort
+
+    - name: "DOWN: Delete DNS records (Cloudflare)"
+      block:
+        - name: "DOWN: Get existing DNS records"
+          ansible.builtin.uri:
+            url: "https://api.cloudflare.com/client/v4/zones/{{ cloudflare_zone_id }}/dns_records?name={{ item }}.{{ primary_domain }}"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ vault_cloudflare_api_token }}"
+            status_code: [200]
+          loop:
+            - lens-test
+            - billing-test
+            - proxy-test
+            - scout-test
+          register: dns_records
+          ignore_errors: true
+
+        - name: "DOWN: Delete DNS records"
+          ansible.builtin.uri:
+            url: "https://api.cloudflare.com/client/v4/zones/{{ cloudflare_zone_id }}/dns_records/{{ item.json.result[0].id }}"
+            method: DELETE
+            headers:
+              Authorization: "Bearer {{ vault_cloudflare_api_token }}"
+            status_code: [200, 404]
+          loop: "{{ dns_records.results }}"
+          when: item.json.result | length > 0
+          ignore_errors: true
+
+        - name: "DOWN: DNS records deleted"
+          ansible.builtin.debug:
+            msg: "DNS records for test environment deleted from Cloudflare"
 
     - name: "DOWN: Terraform apply (destroy test environment)"
       ansible.builtin.command:
@@ -324,7 +491,7 @@
 # =============================================================================
 # TEST - Run end-to-end test
 # =============================================================================
-- name: "TEST ENV E2E - Run End-to-End Test"
+- name: "TEST ENV E2E - Health Checks"
   hosts: localhost
   connection: local
   gather_facts: false
@@ -334,7 +501,6 @@
     billing_url: "https://billing-test.{{ primary_domain }}"
     proxy_url: "https://proxy-test.{{ primary_domain }}"
     lens_url: "https://lens-test.{{ primary_domain }}"
-    manager_url: "https://scout-test.{{ primary_domain }}"
 
   tasks:
     - name: "E2E: Check billing health"
@@ -343,14 +509,6 @@
         method: GET
         timeout: 10
       register: billing_health
-
-    - name: "E2E: Check proxy health"
-      ansible.builtin.uri:
-        url: "{{ proxy_url }}/health"
-        method: GET
-        timeout: 10
-      register: proxy_health
-      ignore_errors: true
 
     - name: "E2E: Check lens health"
       ansible.builtin.uri:
@@ -374,58 +532,93 @@
         timeout: 10
       register: credit_check
 
-    - name: "E2E: Display credit check result"
+    - name: "E2E: Display health check results"
       ansible.builtin.debug:
         msg: |
-          Credit Check Result:
-          {{ credit_check.json | to_nice_json }}
+          Service Health:
+            Billing: {{ 'OK' if billing_health.status == 200 else 'FAILED' }}
+            Lens:    {{ 'OK' if lens_health.status is defined and lens_health.status == 200 else 'FAILED' }}
+          Credit Check: {{ 'OK' if credit_check.status == 200 else 'FAILED' }}
+            has_credit: {{ credit_check.json.has_credit | default('unknown') }}
 
-    - name: "E2E: Make LLM request through proxy"
+- name: "TEST ENV E2E - Agent Interaction Test"
+  hosts: test_scout
+  become: true
+  gather_facts: false
+  tags: [test, never]
+  vars:
+    primary_domain: "ciris-services-1.ai"
+    lens_url: "https://lens-test.{{ primary_domain }}"
+    agent_credentials:
+      username: "admin"
+      password: "ciris_admin_password"
+    test_message: "Hello! Can you hear me?"
+
+  tasks:
+    - name: "E2E: Get agent info from manager"
+      ansible.builtin.shell: |
+        TOKEN=$(curl -s -X POST http://127.0.0.1:8090/manager/v1/dev/token | jq -r .access_token)
+        curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8090/manager/v1/agents | jq -r '.agents[0].agent_id // empty'
+      register: agent_id
+      changed_when: false
+
+    - name: "E2E: Verify agent exists"
+      ansible.builtin.assert:
+        that:
+          - agent_id.stdout | length > 0
+        fail_msg: "No agent found - run setup-e2e first"
+
+    - name: "E2E: Get agent port"
+      ansible.builtin.shell: |
+        TOKEN=$(curl -s -X POST http://127.0.0.1:8090/manager/v1/dev/token | jq -r .access_token)
+        curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8090/manager/v1/agents | jq -r '.agents[0].api_port'
+      register: agent_port
+      changed_when: false
+
+    - name: "E2E: Login to agent"
       ansible.builtin.uri:
-        url: "{{ proxy_url }}/v1/chat/completions"
+        url: "http://localhost:{{ agent_port.stdout }}/v1/auth/login"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ agent_credentials.username }}"
+          password: "{{ agent_credentials.password }}"
+        timeout: 10
+      register: agent_login
+
+    - name: "E2E: Interact with agent"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ agent_port.stdout }}/v1/agent/interact"
         method: POST
         headers:
-          Authorization: "Bearer {{ vault_test_auth_token }}"
+          Authorization: "Bearer {{ agent_login.json.access_token }}"
           Content-Type: "application/json"
         body_format: json
         body:
-          model: "groq/llama-3.3-70b-versatile"
-          messages:
-            - role: "user"
-              content: "Say 'Test successful!' and nothing else."
-          max_tokens: 20
-        timeout: 30
-      register: llm_response
-      ignore_errors: true
+          message: "{{ test_message }}"
+        timeout: 120
+      register: agent_response
 
-    - name: "E2E: Display LLM response"
+    - name: "E2E: Display results"
       ansible.builtin.debug:
         msg: |
           ============================================================
           END-TO-END TEST RESULTS
           ============================================================
-          Service Health:
-            Billing: {{ 'OK' if billing_health.status == 200 else 'FAILED' }}
-            Proxy:   {{ 'OK' if proxy_health.status is defined and proxy_health.status == 200 else 'FAILED' }}
-            Lens:    {{ 'OK' if lens_health.status is defined and lens_health.status == 200 else 'FAILED' }}
+          Agent: {{ agent_id.stdout }}
+          Port:  {{ agent_port.stdout }}
 
-          Test Auth:
-            Credit Check: {{ 'OK' if credit_check.status == 200 else 'FAILED' }}
+          Test Message: "{{ test_message }}"
 
-          LLM Request:
-            Status: {{ 'OK' if llm_response.status is defined and llm_response.status == 200 else 'FAILED' }}
-          {% if llm_response.json is defined %}
-            Response: {{ llm_response.json.choices[0].message.content | default('No content') }}
-          {% endif %}
+          Agent Response:
+            Status: {{ 'OK' if agent_response.status == 200 else 'FAILED' }}
+            Response: {{ agent_response.json.data.response | default('No response') }}
+            Processing Time: {{ agent_response.json.data.processing_time_ms | default('N/A') }}ms
+
+          Flow: User → Agent → Proxy → Billing → LLM → Response
 
           Telemetry:
             Check traces at: {{ lens_url }}
-            Grafana: {{ lens_url | replace('/lens-api', '') }}
-
-          Test User: ciris_test_canary
-
-          Next: Deploy scout agent with covenant metrics:
-            ansible-playbook runbooks/test-env.yml --tags deploy-scout
           ============================================================
 
 # =============================================================================
@@ -491,3 +684,169 @@
 
           ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml \
             --tags scout-agent --vault-password-file ~/.vault_pass
+
+# =============================================================================
+# SETUP-E2E - Create service API key and e2e test agent (automated)
+# =============================================================================
+- name: "TEST ENV SETUP-E2E - Create Service API Key"
+  hosts: test_services
+  become: true
+  gather_facts: false
+  tags: [setup-e2e, never]
+  vars:
+    primary_domain: "ciris-services-1.ai"
+
+  tasks:
+    - name: "SETUP: Wait for billing to be ready"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ billing_port | default(8000) }}/health"
+        status_code: 200
+      register: health
+      retries: 10
+      delay: 5
+      until: health.status == 200
+
+    - name: "SETUP: Create service API key via billing service"
+      ansible.builtin.shell: |
+        docker exec ciris-billing sh -c 'cd /app && python << "EOF"
+        import sys
+        sys.path.insert(0, "/app")
+        import asyncio
+        from uuid import UUID
+        from app.db.session import get_write_session
+        from app.services.api_key import APIKeyService
+
+        async def create():
+            async with get_write_session() as session:
+                svc = APIKeyService(session)
+                result = await svc.create_api_key(
+                    name="proxy-billing-service",
+                    created_by=UUID("00000000-0000-0000-0000-000000000000"),
+                    environment="test",
+                    permissions=["billing:read", "billing:write"]
+                )
+                print(f"NEW_BILLING_API_KEY={result.plaintext_key}")
+                await session.commit()
+
+        asyncio.run(create())
+        EOF
+        '
+      register: api_key_result
+      changed_when: "'NEW_BILLING_API_KEY=' in api_key_result.stdout"
+
+    - name: "SETUP: Extract API key from output"
+      ansible.builtin.set_fact:
+        new_billing_api_key: "{{ api_key_result.stdout | regex_search('NEW_BILLING_API_KEY=(.+)', '\\1') | first }}"
+      when: "'NEW_BILLING_API_KEY=' in api_key_result.stdout"
+
+    - name: "SETUP: Update proxy .env with new API key"
+      ansible.builtin.lineinfile:
+        path: /opt/ciris/proxy/.env
+        regexp: '^BILLING_API_KEY='
+        line: "BILLING_API_KEY={{ new_billing_api_key }}"
+      when: new_billing_api_key is defined
+      register: env_updated
+
+    - name: "SETUP: Restart proxy with new API key"
+      ansible.builtin.shell: |
+        cd /opt/ciris/proxy && docker compose down && docker compose up -d
+      when: env_updated.changed
+
+    - name: "SETUP: Wait for proxy to be healthy"
+      ansible.builtin.shell: |
+        sleep 20 && docker ps | grep ciris-proxy
+      when: env_updated.changed
+
+    - name: "SETUP: Display API key status"
+      ansible.builtin.debug:
+        msg: |
+          Service API Key Created:
+            Key: {{ new_billing_api_key | default('existing key used') }}
+            Proxy updated: {{ env_updated.changed | default(false) }}
+
+- name: "TEST ENV SETUP-E2E - Create E2E Test Agent"
+  hosts: test_scout
+  become: true
+  gather_facts: false
+  tags: [setup-e2e, never]
+  vars:
+    primary_domain: "ciris-services-1.ai"
+    proxy_url: "https://proxy-test.{{ primary_domain }}"
+    billing_url: "https://billing-test.{{ primary_domain }}"
+    test_auth_token: "{{ vault_test_auth_token }}"
+
+  tasks:
+    - name: "AGENT: Get dev token from manager (dev mode only)"
+      ansible.builtin.shell: |
+        curl -s -X POST http://127.0.0.1:8090/manager/v1/dev/token | jq -r '.access_token'
+      register: dev_token
+      changed_when: false
+
+    - name: "AGENT: Verify dev token obtained"
+      ansible.builtin.assert:
+        that:
+          - dev_token.stdout | length > 10
+        fail_msg: "Failed to get dev token - is manager in dev mode (CIRIS_DEV_MODE=true)?"
+
+    - name: "AGENT: Check if e2e agent already exists"
+      ansible.builtin.shell: |
+        curl -s -H "Authorization: Bearer {{ dev_token.stdout }}" http://localhost:8090/manager/v1/agents | jq -r '.agents[]? | select(.template == "scout") | .agent_id' | head -1
+      register: existing_agent
+      changed_when: false
+      ignore_errors: true
+
+    - name: "AGENT: Delete existing e2e agent if present"
+      ansible.builtin.shell: |
+        curl -s -X DELETE -H "Authorization: Bearer {{ dev_token.stdout }}" "http://localhost:8090/manager/v1/agents/{{ existing_agent.stdout }}"
+      when: existing_agent.stdout | default('') | length > 0
+      ignore_errors: true
+
+    - name: "AGENT: Wait for agent cleanup"
+      ansible.builtin.pause:
+        seconds: 5
+      when: existing_agent.stdout | default('') | length > 0
+
+    - name: "AGENT: Create e2e test agent via manager API"
+      ansible.builtin.uri:
+        url: "http://localhost:8090/manager/v1/agents"
+        method: POST
+        body_format: json
+        body:
+          name: "E2E Test Scout"
+          template: "scout"
+          server_id: "local"
+          use_mock_llm: false
+          environment:
+            OPENAI_API_KEY: "{{ test_auth_token }}"
+            OPENAI_API_BASE: "{{ proxy_url }}/v1"
+            OPENAI_MODEL_NAME: "default"
+            CIRIS_BILLING_ENABLED: "true"
+            CIRIS_BILLING_API_KEY: "{{ test_auth_token }}"
+            CIRIS_BILLING_API_URL: "{{ billing_url }}"
+        headers:
+          Content-Type: "application/json"
+          Authorization: "Bearer {{ dev_token.stdout }}"
+        timeout: 60
+        status_code: [200, 201]
+      register: agent_created
+
+    - name: "AGENT: Wait for agent to start"
+      ansible.builtin.pause:
+        seconds: 15
+        prompt: "Waiting for agent container to start..."
+
+    - name: "AGENT: Verify agent is running"
+      ansible.builtin.shell: |
+        curl -s -H "Authorization: Bearer {{ dev_token.stdout }}" http://localhost:8090/manager/v1/agents | jq -r '.agents[] | select(.template == "scout") | "\(.agent_id) - \(.status) - mock_llm=\(.mock_llm)"'
+      register: agent_status
+
+    - name: "AGENT: Display agent info"
+      ansible.builtin.debug:
+        msg: |
+          E2E Test Agent Created:
+            {{ agent_status.stdout }}
+
+          Agent configured with:
+            - Real LLM via proxy: {{ proxy_url }}
+            - Billing integration: {{ billing_url }}
+            - Test auth token: {{ test_auth_token[:20] }}...

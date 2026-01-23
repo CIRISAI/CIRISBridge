@@ -16,6 +16,48 @@
     state: present
     update_cache: true
 
+- name: Create nginx sites-enabled directory
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled
+    state: directory
+    mode: '0755'
+
+- name: Disable nginx default site (conflicts with Caddy)
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+
+- name: Configure nginx to listen on internal port only
+  ansible.builtin.copy:
+    content: |
+      # Nginx for CIRISManager - internal routing only
+      # Caddy handles external TLS termination
+      server {
+          listen 127.0.0.1:8080;
+          server_name localhost;
+
+          location / {
+              return 200 'nginx ready for ciris-manager routing';
+              add_header Content-Type text/plain;
+          }
+      }
+    dest: /etc/nginx/sites-enabled/ciris-manager
+    mode: '0644'
+  notify: Restart nginx
+
+- name: Start and enable nginx
+  ansible.builtin.systemd:
+    name: nginx
+    enabled: true
+    state: started
+
+- name: Allow manager API from Docker networks (for Caddy container)
+  community.general.ufw:
+    rule: allow
+    port: "{{ manager_api_port | default(8090) }}"
+    from_ip: 172.16.0.0/12
+    comment: CIRISManager from Docker
+
 - name: Create manager directories
   ansible.builtin.file:
     path: "{{ item }}"
@@ -77,7 +119,7 @@
 
 - name: Wait for manager to be ready
   ansible.builtin.uri:
-    url: "http://localhost:{{ manager_api_port }}/health"
+    url: "http://localhost:{{ manager_api_port }}/manager/v1/status"
     status_code: 200
   register: health_check
   retries: 10

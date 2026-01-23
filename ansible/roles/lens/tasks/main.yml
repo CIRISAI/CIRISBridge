@@ -1,13 +1,14 @@
 # Deploy CIRISLens - Observability Platform
-# Only deployed on US node (centralized logging)
+# Production: Only deployed on US node (centralized logging)
+# Test: Deployed when deploy_lens=true
 ---
-- name: Check if this is the US node
+- name: Check if this is a lens node
   ansible.builtin.set_fact:
-    is_lens_node: "{{ node_name == 'us' }}"
+    is_lens_node: "{{ (node_name | default('') == 'us') or (deploy_lens | default(false)) }}"
 
-- name: Skip if not US node
+- name: Skip if not lens node
   ansible.builtin.debug:
-    msg: "Skipping CIRISLens deployment - only runs on US node"
+    msg: "Skipping CIRISLens deployment - only runs on US/lens nodes"
   when: not is_lens_node
 
 - name: Deploy CIRISLens

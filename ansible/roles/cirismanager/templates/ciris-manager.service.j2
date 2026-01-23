@@ -12,11 +12,10 @@ Environment="CIRIS_MANAGER_CONFIG={{ manager_config_dir }}/config.yml"
 {% if manager_dev_mode | default(false) %}
 Environment="CIRIS_DEV_MODE=true"
 {% endif %}
+Environment="MANAGER_JWT_SECRET={{ manager_jwt_secret | default('dev-jwt-secret-key-for-testing-only') }}"
+Environment="CIRIS_ENCRYPTION_SALT={{ manager_encryption_salt | default('ciris-manager-encryption-salt') }}"
 
-ExecStart={{ manager_install_dir }}/venv/bin/ciris-manager serve \
-    --host {{ manager_api_host }} \
-    --port {{ manager_api_port }} \
-    --config {{ manager_config_dir }}/config.yml
+ExecStart={{ manager_install_dir }}/venv/bin/ciris-manager --config {{ manager_config_dir }}/config.yml
 
 Restart=always
 RestartSec=10
@@ -24,9 +23,12 @@ RestartSec=10
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths={{ manager_data_dir }} {{ manager_log_dir }}
+# ProtectHome disabled - manager needs ~/.local for Python packages
+ProtectHome=false
+ReadWritePaths={{ manager_data_dir }} {{ manager_log_dir }} {{ manager_config_dir }} /etc/nginx/sites-enabled
 PrivateTmp=true
+# Set HOME to writable location
+Environment="HOME={{ manager_data_dir }}"
 
 # Logging
 StandardOutput=journal

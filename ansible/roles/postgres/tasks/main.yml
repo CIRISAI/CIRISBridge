@@ -46,6 +46,16 @@
     port: "5432"
     proto: tcp
     from_ip: "{{ peer_ip }}"
+  when: not (postgres_standalone | default(false))
+
+# Allow PostgreSQL from VPC (for standalone test environment)
+- name: Allow PostgreSQL from VPC
+  community.general.ufw:
+    rule: allow
+    port: "5432"
+    proto: tcp
+    from_ip: "10.0.0.0/24"
+  when: postgres_standalone | default(false)
 
 # =============================================================================
 # Start PostgreSQL
@@ -63,7 +73,7 @@
     timeout: 60
 
 # =============================================================================
-# Create replication user (on both nodes)
+# Create replication user (on both nodes) - skip for standalone
 # =============================================================================
 - name: Create replication user
   community.docker.docker_container_exec:
@@ -80,6 +90,7 @@
       $$;"
   register: create_replicator
   changed_when: "'CREATE' in create_replicator.stdout"
+  when: not (postgres_standalone | default(false))
 
 # =============================================================================
 # Create application users
@@ -100,7 +111,7 @@
   ignore_errors: true
 
 # =============================================================================
-# Set up Publication (each node publishes its changes)
+# Set up Publication (each node publishes its changes) - skip for standalone
 # =============================================================================
 - name: Create publication for all tables
   community.docker.docker_container_exec:
@@ -116,9 +127,10 @@
       $$;"
   register: create_pub
   changed_when: "'CREATE' in create_pub.stdout"
+  when: not (postgres_standalone | default(false))
 
 # =============================================================================
-# Grant replicator access to all tables
+# Grant replicator access to all tables - skip for standalone
 # =============================================================================
 - name: Grant replicator access to all tables
   community.docker.docker_container_exec:
@@ -128,19 +140,21 @@
       "GRANT SELECT ON ALL TABLES IN SCHEMA public TO replicator;
        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO replicator;"
   ignore_errors: true
+  when: not (postgres_standalone | default(false))
 
 # =============================================================================
-# Copy bi-directional replication setup script
+# Copy bi-directional replication setup script - skip for standalone
 # =============================================================================
 - name: Copy replication setup script
   ansible.builtin.template:
     src: setup-bidirectional-replication.sql.j2
     dest: /opt/ciris/postgres/scripts/setup-replication.sql
     mode: "0644"
+  when: not (postgres_standalone | default(false))
 
 # =============================================================================
 # Note: Subscription creation is done after initial deployment
-# because both nodes need to be running first
+# because both nodes need to be running first - skip for standalone
 # =============================================================================
 - name: Create subscription setup instructions
   ansible.builtin.copy:
@@ -159,3 +173,4 @@
       # The 'origin = none' prevents replication loops (changes from peer won't be re-replicated back)
     dest: /opt/ciris/postgres/REPLICATION_SETUP.md
     mode: "0644"
+  when: not (postgres_standalone | default(false))

@@ -58,3 +58,5 @@ htmlcov/
 ansible/.ansible_cache/
 ansible/.ansible/
 tickets/
+ansible/inventory/test.yml
+ansible/inventory/test-dynamic.yml

@@ -26,5 +26,9 @@ manager_api_port: 8090
 billing_api_url: "https://billing-test.{{ primary_domain }}"
 proxy_api_url: "https://proxy-test.{{ primary_domain }}"
 
+# Security secrets (override in inventory for production)
+manager_jwt_secret: "dev-jwt-secret-key-for-testing-only"
+manager_encryption_salt: "ciris-manager-encryption-salt"
+
 # Agent defaults
 default_agent_template: basic

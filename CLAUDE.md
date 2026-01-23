@@ -81,6 +81,12 @@ Agents cannot serve this mission if users cannot reach them. CIRISBridge provide
 
 Complete test stack with spin up/down capability for end-to-end testing.
 
+**E2E Test Verified: 2026-01-23** - Full pipeline tested successfully:
+- Scout Agent → CIRISProxy → CIRISBilling → LLM Providers (Groq/Together/OpenRouter)
+- Test auth mode with `ciris_test_canary` user
+- Billing charges recorded, LLM responses returned
+- Agent made 30+ real LLM calls through proxy
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                    TEST ENVIRONMENT (Vultr VPC: 10.0.0.0/24)                │
@@ -100,17 +106,21 @@ Complete test stack with spin up/down capability for end-to-end testing.
 
 **Spin Up/Down (Single Command):**
 ```bash
+# Set Cloudflare API token (required for DNS management)
+export CLOUDFLARE_API_TOKEN=xxx
+
 # Spin UP (~$42/month when running)
-ansible-playbook runbooks/test-env.yml --tags up --vault-password-file ~/.vault_pass
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up
 
 # Spin DOWN ($0/month when destroyed)
-ansible-playbook runbooks/test-env.yml --tags down
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down
 
 # Check status
-ansible-playbook runbooks/test-env.yml --tags status
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags status
 
-# Run end-to-end test
-ansible-playbook runbooks/test-env.yml --tags test --vault-password-file ~/.vault_pass
+# Run end-to-end test (setup + test)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test
 ```
 
 **Manual Provisioning:**
@@ -198,6 +208,19 @@ The CIRISLens API exposes these routes (via `/lens-api/*` prefix which strips th
 - `/api/v1/logs/ingest` - Log ingestion (requires service token)
 - `/api/admin/*` - Admin endpoints (requires Google OAuth)
 
+**Public Covenant Repository Endpoints (no auth required):**
+These endpoints are accessible directly without the `/lens-api` prefix:
+- `/api/v1/covenant/repository/traces` - Agent reasoning traces (PII scrubbed)
+- `/api/v1/covenant/repository/statistics` - Aggregate covenant metrics
+
+```bash
+# Example: Get recent agent traces
+curl "https://lens.ciris-services-1.ai/api/v1/covenant/repository/traces?limit=10"
+
+# Example: Get covenant statistics
+curl "https://lens.ciris-services-1.ai/api/v1/covenant/repository/statistics"
+```
+
 Service tokens must be created in the `cirislens.service_tokens` table for billing/proxy to send logs.
 
 ## Key Files
@@ -241,10 +264,12 @@ ansible all -i inventory/production.yml -m shell -a 'docker logs ciris-billing -
 ansible all -i inventory/production.yml -m shell -a 'systemctl list-timers | grep ciris'
 
 # Test Environment (spin up/down full e2e stack)
-ansible-playbook runbooks/test-env.yml --tags up --vault-password-file ~/.vault_pass    # Spin up (~$42/mo)
-ansible-playbook runbooks/test-env.yml --tags down                                       # Spin down ($0/mo)
-ansible-playbook runbooks/test-env.yml --tags status                                     # Health check
-ansible-playbook runbooks/test-env.yml --tags test --vault-password-file ~/.vault_pass  # E2E test
+# Requires: export CLOUDFLARE_API_TOKEN=xxx
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up       # Spin up (~$42/mo)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down     # Spin down ($0/mo)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags status   # Health check
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e  # Create API key + agent
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test     # E2E test through agent
 ```
 
 ## Billing Update Lifecycle
@@ -328,6 +353,7 @@ Operational runbooks for incident response and infrastructure management are in 
 | Runbook | Purpose |
 |---------|---------|
 | `billing-rollback.yml` | Rollback billing to previous version |
+| `billing-ops.yml` | Billing database queries (user lookup, usage, transactions) |
 | `legacy-migration.yml` | Migrate from legacy servers to CIRISBridge |
 | `scout-ops.yml` | Scout agent database queries (stuck thoughts, stats) |
 | `cert-rotate.yml` | Rotate SSL certs for multi-instance deployments |
@@ -390,6 +416,19 @@ ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stuck
 ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags cancel-stuck -e "confirm=yes"  # Cancel stuck
 ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stats                    # Thought/task statistics
 ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stats-by-occurrence      # Stats by agent occurrence
+
+# Billing Operations
+ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags status                 # Quick 24h status
+ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup -e "external_id=123"  # User lookup
+ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags usage -e "external_id=123"   # User usage history
+ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags transactions -e "limit=20"   # Recent transactions
+
+# Test Environment (requires: export CLOUDFLARE_API_TOKEN=xxx)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up         # Spin up (~$42/mo)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down       # Spin down ($0/mo)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags status     # Health check
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e  # Create API key + agent
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test       # Run e2e test
 ```
 
 ### Severity Levels

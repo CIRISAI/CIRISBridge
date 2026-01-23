@@ -7,6 +7,7 @@ contactPoints:
   - orgId: 1
     name: ciris-ops
     receivers:
+{% if discord_webhook_url is defined and discord_webhook_url %}
       # Discord webhook for alerts
       - uid: discord-receiver
         type: discord
@@ -17,6 +18,14 @@ contactPoints:
           title: '{{ "{{" }} template "default.title" . {{ "}}" }}'
           message: '{{ "{{" }} template "default.message" . {{ "}}" }}'
         disableResolveMessage: false
+{% else %}
+      # Email fallback (test environment - no Discord)
+      - uid: email-receiver
+        type: email
+        settings:
+          addresses: admin@{{ primary_domain }}
+        disableResolveMessage: false
+{% endif %}
 
 # Notification policies - route alerts to contact points
 policies:
