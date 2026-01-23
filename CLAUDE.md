@@ -104,23 +104,27 @@ Complete test stack with spin up/down capability for end-to-end testing.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Spin Up/Down (Single Command):**
+**Full E2E Workflow:**
 ```bash
-# Spin UP (~$42/month when running)
+# 1. Spin UP infrastructure (~$42/month when running)
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up
 
-# Spin DOWN ($0/month when destroyed)
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down
+# 2. Deploy services
+ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml
 
-# Check status
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags status
-
-# Run end-to-end test (setup + test)
+# 3. Setup (create API key + test agent)
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e
+
+# 4. Run end-to-end test
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test
+
+# 5. Spin DOWN ($0/month when destroyed)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down
 ```
 
 Note: Cloudflare API token is loaded from `inventory/production.yml` vault.
+
+See [ansible/runbooks/README.md](ansible/runbooks/README.md) for detailed test environment documentation.
 
 **Manual Provisioning:**
 ```bash
@@ -262,12 +266,12 @@ ansible all -i inventory/production.yml -m shell -a 'docker logs ciris-billing -
 # Check scheduler timers
 ansible all -i inventory/production.yml -m shell -a 'systemctl list-timers | grep ciris'
 
-# Test Environment (spin up/down full e2e stack)
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up         # Spin up (~$42/mo)
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down       # Spin down ($0/mo)
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags status     # Health check
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e  # Create API key + agent
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test       # E2E test through agent
+# Test Environment (full e2e workflow)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up           # 1. Spin up infra
+ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml           # 2. Deploy services
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e    # 3. Create API key + agent
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test         # 4. Run e2e test
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down         # 5. Spin down
 ```
 
 ## Billing Update Lifecycle

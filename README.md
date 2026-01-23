@@ -120,6 +120,30 @@ CIRISBridge/
 | Domains (amortized) | ~$3 |
 | **Total** | **~$34/month** |
 
+## Test Environment
+
+Full end-to-end test stack with automated spin up/down. Tests the complete flow: Agent → Proxy → Billing → LLM.
+
+```bash
+# Spin up test environment (~$42/month when running)
+cd ansible
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up
+
+# Deploy services
+ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml
+
+# Setup (create API key + test agent)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e
+
+# Run end-to-end test
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test
+
+# Spin down ($0/month when destroyed)
+ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down
+```
+
+See [ansible/runbooks/README.md](ansible/runbooks/README.md) for detailed test environment documentation.
+
 ## Operations
 
 ### Health Check
