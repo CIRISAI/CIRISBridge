@@ -162,7 +162,7 @@ groups:
         data:
           - refId: A
             relativeTimeRange:
-              from: 600
+              from: 3600
               to: 0
             datasourceUid: postgresql
             model:
@@ -174,11 +174,11 @@ groups:
                 WHERE service_name = 'ciris-scheduler'
                   AND event = 'heartbeat'
                   AND server_id = 'us'
-                  AND timestamp > NOW() - INTERVAL '10 minutes'
+                  AND timestamp > NOW() - INTERVAL '60 minutes'
               format: table
           - refId: B
             relativeTimeRange:
-              from: 600
+              from: 3600
               to: 0
             datasourceUid: __expr__
             model:
@@ -190,7 +190,7 @@ groups:
               type: reduce
           - refId: C
             relativeTimeRange:
-              from: 600
+              from: 3600
               to: 0
             datasourceUid: __expr__
             model:
@@ -206,10 +206,10 @@ groups:
               type: threshold
         noDataState: Alerting
         execErrState: Alerting
-        for: 0s
+        for: 5m
         annotations:
           summary: "Scheduler heartbeat missing from US node"
-          description: "The US node (Vultr) has sent fewer than 2 heartbeats in the last 10 minutes. Expected heartbeat every 5 minutes. Node may be down or scheduler service is failing."
+          description: "The US node (Vultr) has sent fewer than 2 heartbeats in the last 60 minutes. Expected heartbeat every 20 minutes (3/hour). Node may be down or scheduler service is failing."
           runbook_url: "https://lens.ciris-services-1.ai/d/service-logs/service-logs"
         labels:
           severity: critical
@@ -223,7 +223,7 @@ groups:
         data:
           - refId: A
             relativeTimeRange:
-              from: 600
+              from: 3600
               to: 0
             datasourceUid: postgresql
             model:
@@ -235,11 +235,11 @@ groups:
                 WHERE service_name = 'ciris-scheduler'
                   AND event = 'heartbeat'
                   AND server_id = 'eu'
-                  AND timestamp > NOW() - INTERVAL '10 minutes'
+                  AND timestamp > NOW() - INTERVAL '60 minutes'
               format: table
           - refId: B
             relativeTimeRange:
-              from: 600
+              from: 3600
               to: 0
             datasourceUid: __expr__
             model:
@@ -251,7 +251,7 @@ groups:
               type: reduce
           - refId: C
             relativeTimeRange:
-              from: 600
+              from: 3600
               to: 0
             datasourceUid: __expr__
             model:
@@ -267,10 +267,10 @@ groups:
               type: threshold
         noDataState: Alerting
         execErrState: Alerting
-        for: 0s
+        for: 5m
         annotations:
           summary: "Scheduler heartbeat missing from EU node"
-          description: "The EU node (Hetzner) has sent fewer than 2 heartbeats in the last 10 minutes. Expected heartbeat every 5 minutes. Node may be down or scheduler service is failing."
+          description: "The EU node (Hetzner) has sent fewer than 2 heartbeats in the last 60 minutes. Expected heartbeat every 20 minutes (3/hour). Node may be down or scheduler service is failing."
           runbook_url: "https://lens.ciris-services-1.ai/d/service-logs/service-logs"
         labels:
           severity: critical
