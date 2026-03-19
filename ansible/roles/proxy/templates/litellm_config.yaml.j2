@@ -3,13 +3,35 @@
 # Source: synced from CIRISProxy/litellm_config.yaml
 
 model_list:
-  # Llama 4 Maverick - Primary model for CIRIS Agent
-  # Best for structured outputs / tool calling
-  # Pricing: OpenRouter $0.11/$0.34, Groq $0.50/$0.77, Together ~$0.50/$0.80 per 1M tokens
+  # Llama 4 Scout - Primary model for CIRIS Agent (2026-03-19)
+  # Multimodal, 128K context, 460+ tok/s on Groq
+  # Pricing: Groq $0.11/$0.34, OpenRouter $0.08/$0.30 per 1M tokens
+  - model_name: "llama-4-scout"
+    litellm_params:
+      model: "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+      api_key: "os.environ/GROQ_API_KEY"
+
+  - model_name: "groq/llama-4-scout"
+    litellm_params:
+      model: "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+      api_key: "os.environ/GROQ_API_KEY"
+
+  - model_name: "openrouter/llama-4-scout"
+    litellm_params:
+      model: "openrouter/meta-llama/llama-4-scout"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+
+  - model_name: "nvidia/llama-4-scout"
+    litellm_params:
+      model: "nvidia_nim/meta/llama-4-scout-17b-16e-instruct"
+      api_key: "os.environ/NVIDIA_NIM_API_KEY"
+
+  # Llama 4 Maverick - DEPRECATED (being removed from Groq/Together)
+  # Kept for backwards compatibility
   - model_name: "llama-4-maverick"
     litellm_params:
-      model: "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
-      api_key: "os.environ/TOGETHER_API_KEY"
+      model: "openrouter/meta-llama/llama-4-maverick"
+      api_key: "os.environ/OPENROUTER_API_KEY"
 
   - model_name: "together/llama-4-maverick"
     litellm_params:
@@ -91,15 +113,15 @@ model_list:
       api_key: "os.environ/OPENAI_API_KEY"
 
   # Aliases for simpler client usage
-  # Default model for CIRIS Agent - Llama 4 Maverick via Together (most reliable)
+  # Default model for CIRIS Agent - Llama 4 Scout via Groq (fastest, most reliable)
   - model_name: "default"
     litellm_params:
-      model: "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
-      api_key: "os.environ/TOGETHER_API_KEY"
+      model: "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+      api_key: "os.environ/GROQ_API_KEY"
 
   - model_name: "fast"
     litellm_params:
-      model: "groq/meta-llama/llama-4-maverick-17b-128e-instruct"
+      model: "groq/meta-llama/llama-4-scout-17b-16e-instruct"
       api_key: "os.environ/GROQ_API_KEY"
 
 litellm_settings:
@@ -131,14 +153,15 @@ router_settings:
   num_retries: 2
   retry_after: 1
 
-  # Fallback chain - Llama 4 Maverick across 3 providers
-  # OpenRouter last due to timeout issues; Together primary, Groq secondary
+  # Fallback chain - Llama 4 Scout: Groq primary, OpenRouter backup, NVIDIA tertiary
   fallbacks:
-    - "default": ["groq/llama-4-maverick", "openrouter/llama-4-maverick"]
-    - "llama-4-maverick": ["groq/llama-4-maverick", "openrouter/llama-4-maverick"]
-    - "together/llama-4-maverick": ["groq/llama-4-maverick", "openrouter/llama-4-maverick"]
-    - "groq/llama-4-maverick": ["together/llama-4-maverick", "openrouter/llama-4-maverick"]
-    - "openrouter/llama-4-maverick": ["together/llama-4-maverick", "groq/llama-4-maverick"]
+    - "default": ["openrouter/llama-4-scout", "nvidia/llama-4-scout"]
+    - "llama-4-scout": ["openrouter/llama-4-scout", "nvidia/llama-4-scout"]
+    - "groq/llama-4-scout": ["openrouter/llama-4-scout", "nvidia/llama-4-scout"]
+    - "openrouter/llama-4-scout": ["groq/llama-4-scout", "nvidia/llama-4-scout"]
+    - "nvidia/llama-4-scout": ["groq/llama-4-scout", "openrouter/llama-4-scout"]
+    # Legacy Maverick fallbacks (deprecated)
+    - "llama-4-maverick": ["openrouter/llama-4-maverick"]
     - "groq/llama-3.3-70b": ["together/llama-3.1-70b", "openai/gpt-4o-mini"]
 
 general_settings:
