@@ -9,7 +9,7 @@ services:
     ports:
       - "53:53/udp"
       - "53:53/tcp"
-      - "127.0.0.1:8080:8080"  # REST API - localhost only
+      - "127.0.0.1:8085:8080"  # REST API - localhost only (8085 to avoid conflict with billing on 8080)
     volumes:
       - ./config.cfg:/etc/constellation.cfg:ro
       - ./data/geoip:/data:ro
@@ -21,11 +21,12 @@ services:
     networks:
       - cirisdns
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/health || exit 1"]
-      interval: 10s
-      timeout: 5s
+      # Check if DNS is responding to queries on UDP port 53
+      test: ["CMD-SHELL", "nc -z -u localhost 53 || exit 1"]
+      interval: 30s
+      timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 30s
 
   redis:
     image: redis:7-alpine
