@@ -21,10 +21,12 @@ model_list:
       model: "openrouter/meta-llama/llama-4-scout"
       api_key: "os.environ/OPENROUTER_API_KEY"
 
-  - model_name: "nvidia/llama-4-scout"
+  # Together fallback - Maverick (Scout not on serverless)
+  # TODO: Replace when Scout available or Maverick deprecated
+  - model_name: "together/llama-4-scout"
     litellm_params:
-      model: "nvidia_nim/meta/llama-4-scout-17b-16e-instruct"
-      api_key: "os.environ/NVIDIA_NIM_API_KEY"
+      model: "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+      api_key: "os.environ/TOGETHER_API_KEY"
 
   # Llama 4 Maverick - DEPRECATED (being removed from Groq/Together)
   # Kept for backwards compatibility
@@ -153,13 +155,13 @@ router_settings:
   num_retries: 2
   retry_after: 1
 
-  # Fallback chain - Llama 4 Scout: Groq primary, OpenRouter backup, NVIDIA tertiary
+  # Fallback chain - Llama 4 Scout: Groq primary, OpenRouter backup, Together tertiary
   fallbacks:
-    - "default": ["openrouter/llama-4-scout", "nvidia/llama-4-scout"]
-    - "llama-4-scout": ["openrouter/llama-4-scout", "nvidia/llama-4-scout"]
-    - "groq/llama-4-scout": ["openrouter/llama-4-scout", "nvidia/llama-4-scout"]
-    - "openrouter/llama-4-scout": ["groq/llama-4-scout", "nvidia/llama-4-scout"]
-    - "nvidia/llama-4-scout": ["groq/llama-4-scout", "openrouter/llama-4-scout"]
+    - "default": ["openrouter/llama-4-scout", "together/llama-4-scout"]
+    - "llama-4-scout": ["openrouter/llama-4-scout", "together/llama-4-scout"]
+    - "groq/llama-4-scout": ["openrouter/llama-4-scout", "together/llama-4-scout"]
+    - "openrouter/llama-4-scout": ["groq/llama-4-scout", "together/llama-4-scout"]
+    - "together/llama-4-scout": ["groq/llama-4-scout", "openrouter/llama-4-scout"]
     # Legacy Maverick fallbacks (deprecated)
     - "llama-4-maverick": ["openrouter/llama-4-maverick"]
     - "groq/llama-3.3-70b": ["together/llama-3.1-70b", "openai/gpt-4o-mini"]
