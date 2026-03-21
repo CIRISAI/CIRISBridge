@@ -303,13 +303,13 @@ Both nodes run systemd timers that post health data to CIRISLens:
 
 | Timer | Schedule | Purpose |
 |-------|----------|---------|
-| `ciris-heartbeat.timer` | Every 5 min | Node liveness heartbeat |
+| `ciris-heartbeat.timer` | Every 20 min | Node liveness heartbeat (3/hour, alert if <2) |
 | `ciris-daily-checks.timer` | 06:00 UTC daily | Cert status, replication, disk |
 | `ciris-weekly-security.timer` | Sun 04:00 UTC | Security posture scan |
 | `ciris-weekly-cleanup.timer` | Sat 03:00 UTC | Docker/log cleanup |
 
 **Grafana Alerts:**
-- `heartbeat-missing-us-alert` / `heartbeat-missing-eu-alert`: Fires if <2 heartbeats in 10 min
+- `heartbeat-missing-us-alert` / `heartbeat-missing-eu-alert`: Fires if <2 heartbeats in 60 min
 - Alerts use `noDataState: Alerting` - if CIRISLens can't query, it alerts
 
 **Adding scheduler token for new deployments:**
