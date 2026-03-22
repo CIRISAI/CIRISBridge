@@ -32,3 +32,9 @@
     name: ciris-weekly-cleanup.timer
     enabled: true
     state: started
+
+- name: Enable lens backup timer
+  ansible.builtin.systemd:
+    name: ciris-lens-backup.timer
+    enabled: true
+    state: started

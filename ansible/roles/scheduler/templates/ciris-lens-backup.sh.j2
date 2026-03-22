@@ -1,0 +1,168 @@
+#!/bin/bash
+# CIRISLens Daily Backup
+# Creates pg_dump of CIRISLens TimescaleDB, retains last 7 days
+# Managed by Ansible - do not edit manually
+
+set -euo pipefail
+
+LENS_ENDPOINT="{{ cirislens_endpoint }}/lens-api/api/v1/logs/ingest"
+SERVICE_TOKEN="{{ scheduler_service_token }}"
+NODE_NAME="{{ node_name }}"
+
+# Backup settings
+BACKUP_DIR="/data/backups/cirislens"
+RETENTION_DAYS=7
+DB_CONTAINER="cirislens-db"
+DB_NAME="{{ lens_db_name | default('cirislens') }}"
+DB_USER="{{ lens_db_user | default('cirislens') }}"
+
+log_to_lens() {
+  local level="$1"
+  local message="$2"
+  local event="$3"
+  local metadata="$4"
+
+  curl -s -X POST "${LENS_ENDPOINT}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${SERVICE_TOKEN}" \
+    -d "{
+      \"service_name\": \"ciris-scheduler\",
+      \"level\": \"${level}\",
+      \"message\": \"${message}\",
+      \"event\": \"${event}\",
+      \"node\": \"${NODE_NAME}\",
+      \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\",
+      \"metadata\": ${metadata}
+    }" \
+    --connect-timeout 5 \
+    --max-time 10 \
+    >/dev/null 2>&1 || true
+}
+
+echo "=== CIRISLens Daily Backup - ${NODE_NAME} - $(date -u) ==="
+
+# ============================================================================
+# PRE-FLIGHT CHECKS
+# ============================================================================
+echo ""
+echo "--- Pre-flight Checks ---"
+
+# Check if CIRISLens DB is running
+if ! docker ps --format '{% raw %}{{.Names}}{% endraw %}' | grep -q "^${DB_CONTAINER}$"; then
+  echo "ERROR: CIRISLens database container not running"
+  log_to_lens "ERROR" "CIRISLens backup failed: database not running" "lens_backup_failed" "{\"reason\": \"container_not_running\"}"
+  exit 1
+fi
+echo "Database container: running"
+
+# Create backup directory
+mkdir -p "$BACKUP_DIR"
+echo "Backup directory: $BACKUP_DIR"
+
+# Check disk space (need at least 1GB free)
+DISK_FREE_KB=$(df "$BACKUP_DIR" | awk 'NR==2 {print $4}')
+if [ "$DISK_FREE_KB" -lt 1048576 ]; then
+  echo "ERROR: Insufficient disk space (< 1GB free)"
+  log_to_lens "ERROR" "CIRISLens backup failed: insufficient disk space" "lens_backup_failed" "{\"reason\": \"low_disk_space\", \"free_kb\": ${DISK_FREE_KB}}"
+  exit 1
+fi
+echo "Disk space: $(echo "$DISK_FREE_KB" | awk '{printf "%.1f GB", $1/1048576}') available"
+
+# ============================================================================
+# CREATE BACKUP
+# ============================================================================
+echo ""
+echo "--- Creating Backup ---"
+
+TIMESTAMP=$(date -u '+%Y%m%d_%H%M%S')
+BACKUP_FILE="cirislens_${TIMESTAMP}.sql.gz"
+BACKUP_PATH="${BACKUP_DIR}/${BACKUP_FILE}"
+
+# Get database size before backup
+DB_SIZE=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c \
+  "SELECT pg_size_pretty(pg_database_size('${DB_NAME}'));" 2>/dev/null | xargs)
+echo "Database size: $DB_SIZE"
+
+# Create backup with compression
+echo "Creating backup: $BACKUP_FILE"
+START_TIME=$(date +%s)
+
+if docker exec "$DB_CONTAINER" pg_dump -U "$DB_USER" -d "$DB_NAME" \
+  --no-owner \
+  --no-acl \
+  --format=plain | gzip > "$BACKUP_PATH"; then
+
+  END_TIME=$(date +%s)
+  DURATION=$((END_TIME - START_TIME))
+  BACKUP_SIZE=$(ls -lh "$BACKUP_PATH" | awk '{print $5}')
+
+  echo "Backup completed in ${DURATION}s"
+  echo "Backup size: $BACKUP_SIZE"
+
+  # Verify backup integrity
+  echo ""
+  echo "--- Verifying Backup ---"
+  if gzip -t "$BACKUP_PATH" 2>/dev/null; then
+    echo "Compression: valid"
+  else
+    echo "ERROR: Backup file is corrupt"
+    rm -f "$BACKUP_PATH"
+    log_to_lens "ERROR" "CIRISLens backup failed: corrupt file" "lens_backup_failed" "{\"reason\": \"corrupt_backup\"}"
+    exit 1
+  fi
+
+  # Check if file has content
+  UNCOMPRESSED_SIZE=$(gzip -l "$BACKUP_PATH" | awk 'NR==2 {print $2}')
+  if [ "$UNCOMPRESSED_SIZE" -lt 1000 ]; then
+    echo "WARNING: Backup seems unusually small (${UNCOMPRESSED_SIZE} bytes)"
+  else
+    echo "Uncompressed size: $(echo "$UNCOMPRESSED_SIZE" | awk '{printf "%.1f MB", $1/1048576}')"
+  fi
+
+  # Create checksum
+  CHECKSUM=$(sha256sum "$BACKUP_PATH" | awk '{print $1}')
+  echo "$CHECKSUM" > "${BACKUP_PATH}.sha256"
+  echo "Checksum: ${CHECKSUM:0:16}..."
+
+else
+  echo "ERROR: Backup failed"
+  rm -f "$BACKUP_PATH"
+  log_to_lens "ERROR" "CIRISLens backup failed: pg_dump error" "lens_backup_failed" "{\"reason\": \"pg_dump_failed\"}"
+  exit 1
+fi
+
+# ============================================================================
+# CLEANUP OLD BACKUPS
+# ============================================================================
+echo ""
+echo "--- Cleaning Old Backups ---"
+
+BEFORE_COUNT=$(find "$BACKUP_DIR" -name "cirislens_*.sql.gz" | wc -l)
+find "$BACKUP_DIR" -name "cirislens_*.sql.gz" -mtime +${RETENTION_DAYS} -delete
+find "$BACKUP_DIR" -name "cirislens_*.sql.gz.sha256" -mtime +${RETENTION_DAYS} -delete
+AFTER_COUNT=$(find "$BACKUP_DIR" -name "cirislens_*.sql.gz" | wc -l)
+DELETED=$((BEFORE_COUNT - AFTER_COUNT))
+
+echo "Retention policy: ${RETENTION_DAYS} days"
+echo "Backups deleted: $DELETED"
+echo "Backups remaining: $AFTER_COUNT"
+
+# List current backups
+echo ""
+echo "--- Current Backups ---"
+ls -lh "$BACKUP_DIR"/cirislens_*.sql.gz 2>/dev/null | tail -5 || echo "No backups found"
+
+# ============================================================================
+# SUMMARY
+# ============================================================================
+echo ""
+echo "=== Backup Summary ==="
+echo "Database: $DB_NAME ($DB_SIZE)"
+echo "Backup file: $BACKUP_FILE ($BACKUP_SIZE)"
+echo "Duration: ${DURATION}s"
+echo "Retention: ${RETENTION_DAYS} days (${AFTER_COUNT} backups)"
+
+log_to_lens "INFO" "CIRISLens backup completed successfully" "lens_backup_complete" "{\"database\": \"${DB_NAME}\", \"db_size\": \"${DB_SIZE}\", \"backup_size\": \"${BACKUP_SIZE}\", \"duration_seconds\": ${DURATION}, \"backups_retained\": ${AFTER_COUNT}}"
+
+echo ""
+echo "=== CIRISLens backup complete ==="

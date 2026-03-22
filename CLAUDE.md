@@ -307,6 +307,7 @@ Both nodes run systemd timers that post health data to CIRISLens:
 | `ciris-daily-checks.timer` | 06:00 UTC daily | Cert status, replication, disk |
 | `ciris-weekly-security.timer` | Sun 04:00 UTC | Security posture scan |
 | `ciris-weekly-cleanup.timer` | Sat 03:00 UTC | Docker/log cleanup |
+| `ciris-lens-backup.timer` | 02:00 UTC daily | CIRISLens TimescaleDB backup (US only, 7-day retention) |
 
 **Grafana Alerts:**
 - `heartbeat-missing-us-alert` / `heartbeat-missing-eu-alert`: Fires if <2 heartbeats in 60 min

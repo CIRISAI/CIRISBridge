@@ -46,6 +46,15 @@
     owner: root
     group: root
 
+- name: Deploy CIRISLens backup script (US only)
+  ansible.builtin.template:
+    src: ciris-lens-backup.sh.j2
+    dest: /opt/ciris/scheduler/ciris-lens-backup.sh
+    mode: "0750"
+    owner: root
+    group: root
+  when: inventory_hostname == 'vultr'
+
 # ============================================================================
 # DEPLOY SYSTEMD SERVICES
 # ============================================================================
@@ -75,6 +84,14 @@
     src: ciris-weekly-cleanup.service.j2
     dest: /etc/systemd/system/ciris-weekly-cleanup.service
     mode: "0644"
+  notify: Reload systemd
+
+- name: Deploy CIRISLens backup service (US only)
+  ansible.builtin.template:
+    src: ciris-lens-backup.service.j2
+    dest: /etc/systemd/system/ciris-lens-backup.service
+    mode: "0644"
+  when: inventory_hostname == 'vultr'
   notify: Reload systemd
 
 # ============================================================================
@@ -116,6 +133,16 @@
     - Reload systemd
     - Enable weekly cleanup timer
 
+- name: Deploy CIRISLens backup timer (US only)
+  ansible.builtin.template:
+    src: ciris-lens-backup.timer.j2
+    dest: /etc/systemd/system/ciris-lens-backup.timer
+    mode: "0644"
+  when: inventory_hostname == 'vultr'
+  notify:
+    - Reload systemd
+    - Enable lens backup timer
+
 # ============================================================================
 # ENSURE TIMERS ARE ENABLED AND STARTED
 # ============================================================================
@@ -130,6 +157,14 @@
     - ciris-daily-checks.timer
     - ciris-weekly-security.timer
     - ciris-weekly-cleanup.timer
+
+- name: Ensure CIRISLens backup timer is enabled (US only)
+  ansible.builtin.systemd:
+    name: ciris-lens-backup.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: inventory_hostname == 'vultr'
 
 # ============================================================================
 # INITIAL HEARTBEAT TEST
