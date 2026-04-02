@@ -185,21 +185,3 @@ billing.ciris.ai {
 }
 {% endif %}
 
-{% if inventory_hostname == 'hetzner' %}
-# EU LLM endpoints
-llm-eu.ciris.ai, llm01.ciris-services-eu-1.com {
-    reverse_proxy ciris-proxy:{{ proxy_port }}
-
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        X-Content-Type-Options nosniff
-        X-Frame-Options DENY
-        -Server
-    }
-
-    log {
-        output file /var/log/caddy/llm-eu.log
-        format json
-    }
-}
-{% endif %}
