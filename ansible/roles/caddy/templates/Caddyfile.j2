@@ -53,29 +53,8 @@ llm01.{{ dns_soa }} {
     }
 }
 
-# LLM Proxy (legacy proxy1 endpoint)
-proxy1.{{ dns_soa }} {
-{% if proxy_enabled | default(true) %}
-    reverse_proxy ciris-proxy:{{ proxy_port }}
-{% else %}
-    # Proxy disabled via proxy_enabled=false
-    respond "Service temporarily unavailable" 503
-{% endif %}
-
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        X-Content-Type-Options nosniff
-        X-Frame-Options DENY
-        -Server
-    }
-
-    log {
-        output file /var/log/caddy/proxy.log
-        format json
-    }
-}
-
-# Agents endpoint (same as billing for now)
+{% if inventory_hostname == 'vultr' %}
+# Agents endpoint (US only, same as billing for now)
 agents.{{ dns_soa }} {
     reverse_proxy ciris-billing:8000 {
         health_uri /health
@@ -89,8 +68,6 @@ agents.{{ dns_soa }} {
         -Server
     }
 }
-
-{% if inventory_hostname == 'vultr' %}
 # CIRISLens - Observability (US node only)
 lens.{{ dns_soa }} {
     # Public covenant API endpoints (no auth required)
