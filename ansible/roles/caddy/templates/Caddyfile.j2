@@ -35,7 +35,10 @@ billing1.{{ dns_soa }} {
 # LLM Proxy (primary endpoint)
 llm01.{{ dns_soa }} {
 {% if proxy_enabled | default(true) %}
-    reverse_proxy ciris-proxy:{{ proxy_port }}
+    reverse_proxy ciris-proxy:{{ proxy_port }} {
+        health_uri /health/liveliness
+        health_interval 30s
+    }
 {% else %}
     respond "Service temporarily unavailable" 503
 {% endif %}
