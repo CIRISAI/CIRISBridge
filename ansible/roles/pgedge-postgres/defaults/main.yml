@@ -1,0 +1,27 @@
+---
+# pgEdge Postgres defaults for CIRISBridge Spock multi-master replication
+#
+# IMPORTANT: This runs on port 5433 alongside existing postgres on 5432
+# to allow side-by-side testing before migration.
+
+pgedge_image: "pgedge/pgedge:pg15-latest"
+pgedge_container_name: "ciris-billing-spock"
+pgedge_port: 5433
+pgedge_db: "ciris_billing"
+pgedge_user: "billing"
+# pgedge_password: must be provided via vault
+
+# Data directory on host (separate from standard postgres)
+pgedge_data_dir: "/data/pgedge-billing"
+
+# Restart policy
+pgedge_restart_policy: "unless-stopped"
+
+# Spock configuration
+spock_enabled: true
+spock_extension_version: "5.0.1"
+
+# Replication capacity
+pgedge_max_replication_slots: 20
+pgedge_max_wal_senders: 20
+pgedge_max_worker_processes: 20

@@ -1,0 +1,75 @@
+---
+# Spock Multi-Master Billing Configuration
+#
+# Configuration for pgEdge/Spock bi-directional replication of ciris_billing
+# Runs on port 5433 alongside existing postgres (5432) for migration
+#
+# MIGRATION STATUS: Pending deployment
+# - Phase 1: Deploy pgEdge containers (port 5433)
+# - Phase 2: Initialize Spock replication
+# - Phase 3: Migrate data from old postgres
+# - Phase 4: Switch billing to new postgres
+# - Phase 5: Decommission old postgres
+
+# === Container Images ===
+pgedge_image: "pgedge/pgedge:pg15-latest"
+
+# === PostgreSQL (Spock Multi-Master) ===
+pgedge_port: 5433  # Separate from existing postgres (5432)
+pgedge_db: ciris_billing
+pgedge_user: billing
+pgedge_password: "{{ vault_pgedge_billing_password }}"
+spock_replicator_password: "{{ vault_spock_replicator_password }}"
+
+# Container config (separate namespace from existing)
+pgedge_container_name: ciris-billing-spock
+pgedge_data_dir: "/data/pgedge-billing"
+pgedge_restart_policy: "unless-stopped"
+
+# Spock extension config (pgEdge includes Spock 5.0.1)
+spock_enabled: true
+spock_extension_version: "5.0.1"
+spock_conflict_resolution: last_update_wins  # Billing is mutable
+spock_conflict_log_level: log
+
+# Replication capacity
+pgedge_max_replication_slots: 20
+pgedge_max_wal_senders: 20
+pgedge_max_worker_processes: 20
+
+# Sequence offsets for multi-master (prevent PK conflicts)
+# US: starts at 1, increments by 2 (odd numbers)
+# EU: starts at 1000000, increments by 2 (even numbers)
+spock_sequence_config:
+  billing-us:
+    start: 1
+    increment: 2
+  billing-eu:
+    start: 1000000
+    increment: 2
+
+# Per-table conflict resolution
+# Most billing tables use last_update_wins since data is mutable
+spock_table_config:
+  users:
+    conflict_resolution: last_update_wins
+    rationale: "User metadata can be updated"
+  credits:
+    conflict_resolution: last_update_wins
+    rationale: "Credit balances are mutable"
+  charges:
+    conflict_resolution: first_update_wins
+    rationale: "Charges are immutable once created"
+  transactions:
+    conflict_resolution: first_update_wins
+    rationale: "Transaction records are immutable"
+  api_keys:
+    conflict_resolution: last_update_wins
+    rationale: "API keys can be rotated/updated"
+  rate_limits:
+    conflict_resolution: last_update_wins
+    rationale: "Rate limits can be adjusted"
+
+# Node-specific configuration (set via host_vars)
+# spock_node_name: billing-us or billing-eu
+# spock_dsn: host=<ip> port=5433 dbname=ciris_billing user=replicator

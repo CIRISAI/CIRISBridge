@@ -1,0 +1,8 @@
+---
+# Handlers for pgEdge Postgres
+
+- name: Restart pgEdge postgres
+  community.docker.docker_container:
+    name: "{{ pgedge_container_name }}"
+    state: started
+    restart: true

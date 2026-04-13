@@ -1,0 +1,10 @@
+---
+# US Node (Vultr Chicago) - Spock configuration
+# This file extends the inventory with Spock-specific settings
+
+spock_node_name: billing-us
+spock_dsn: "host=108.61.242.236 port=5433 dbname=ciris_billing user=replicator"
+
+# Sequence offset for this node (odd numbers)
+spock_sequence_start: 1
+spock_sequence_increment: 2

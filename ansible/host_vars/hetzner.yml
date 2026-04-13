@@ -1,0 +1,10 @@
+---
+# EU Node (Hetzner Germany) - Spock configuration
+# This file extends the inventory with Spock-specific settings
+
+spock_node_name: billing-eu
+spock_dsn: "host=46.224.81.217 port=5433 dbname=ciris_billing user=replicator"
+
+# Sequence offset for this node (even numbers, starting at 1M)
+spock_sequence_start: 1000000
+spock_sequence_increment: 2

@@ -1,0 +1,93 @@
+---
+# pgEdge Postgres with Spock for CIRISBridge multi-master billing replication
+#
+# Uses host networking for cross-region Spock replication on port 5433
+# Runs alongside existing postgres (5432) for side-by-side migration
+
+- name: Create pgEdge directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+  loop:
+    - /opt/ciris/pgedge-billing
+    - "{{ pgedge_data_dir }}"
+
+- name: Check if pgEdge container exists
+  community.docker.docker_container_info:
+    name: "{{ pgedge_container_name }}"
+  register: pgedge_container_info
+
+- name: Deploy pgEdge postgres container
+  community.docker.docker_container:
+    name: "{{ pgedge_container_name }}"
+    image: "{{ pgedge_image }}"
+    state: started
+    restart_policy: "{{ pgedge_restart_policy }}"
+    network_mode: host
+    env:
+      POSTGRES_USER: "{{ pgedge_user }}"
+      POSTGRES_PASSWORD: "{{ pgedge_password }}"
+      POSTGRES_DB: "{{ pgedge_db }}"
+      PGPORT: "{{ pgedge_port | string }}"
+    volumes:
+      - "{{ pgedge_data_dir }}:/home/pgedge/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ pgedge_user }} -d {{ pgedge_db }} -p {{ pgedge_port }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+  register: pgedge_deploy
+  notify: Restart pgEdge postgres
+
+- name: Wait for pgEdge postgres to be ready
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ pgedge_port }}"
+    delay: 5
+    timeout: 120
+
+- name: Verify postgres is responding
+  ansible.builtin.shell: |
+    docker exec {{ pgedge_container_name }} /opt/pgedge/pg15/bin/psql -U {{ pgedge_user }} -p {{ pgedge_port }} -d {{ pgedge_db }} -c "SELECT 1;"
+  register: pg_verify
+  retries: 5
+  delay: 5
+  until: pg_verify.rc == 0
+  changed_when: false
+
+- name: Create replicator user for Spock
+  ansible.builtin.shell: |
+    docker exec {{ pgedge_container_name }} /opt/pgedge/pg15/bin/psql -U {{ pgedge_user }} -p {{ pgedge_port }} -d {{ pgedge_db }} -c "
+      DO \$\$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'replicator') THEN
+          CREATE ROLE replicator WITH LOGIN REPLICATION PASSWORD '{{ spock_replicator_password }}';
+        END IF;
+      END
+      \$\$;
+      GRANT ALL ON DATABASE {{ pgedge_db }} TO replicator;
+    "
+  register: create_replicator
+  changed_when: "'CREATE ROLE' in create_replicator.stdout"
+  no_log: true
+
+- name: Display pgEdge status
+  ansible.builtin.debug:
+    msg: |
+      pgEdge Postgres deployed on {{ inventory_hostname }}
+      - Container: {{ pgedge_container_name }}
+      - Port: {{ pgedge_port }}
+      - Database: {{ pgedge_db }}
+      - Data Dir: {{ pgedge_data_dir }}
+      - Spock Enabled: {{ spock_enabled }}
+      NOTE: This runs alongside existing postgres (5432) for migration
+
+- name: Update restart policy on existing container
+  community.docker.docker_container:
+    name: "{{ pgedge_container_name }}"
+    restart_policy: "{{ pgedge_restart_policy }}"
+  when: pgedge_container_info.exists | default(false)

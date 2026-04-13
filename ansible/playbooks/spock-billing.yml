@@ -1,0 +1,237 @@
+---
+# Spock Billing Stack Deployment
+#
+# Deploys pgEdge Postgres with Spock multi-master replication for billing
+# Runs on port 5433 alongside existing postgres (5432) for safe migration
+#
+# IMPORTANT: This is a SEPARATE deployment from existing postgres.
+# Both can run simultaneously to allow data migration and testing.
+#
+# Usage:
+#   # Deploy pgEdge containers to all nodes:
+#   ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml
+#
+#   # Deploy to specific node:
+#   ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml -l vultr
+#
+#   # Initialize Spock replication (after all nodes deployed):
+#   ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml --tags spock
+#
+#   # Check Spock status:
+#   ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml --tags status
+#
+# Manual verification commands:
+#   # Check Spock status on US:
+#   ssh root@108.61.242.236 "docker exec ciris-billing-spock /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing -c \"SELECT * FROM spock.sub_show_status();\""
+#
+#   # Check Spock status on EU:
+#   ssh root@46.224.81.217 "docker exec ciris-billing-spock /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing -c \"SELECT * FROM spock.sub_show_status();\""
+
+- name: Deploy pgEdge Postgres for Billing (Spock Multi-Master)
+  hosts: all
+  become: yes
+  vars_files:
+    - ../group_vars/spock_billing.yml
+
+  pre_tasks:
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: |
+          Deploying pgEdge Spock Postgres to {{ inventory_hostname }}
+          - Spock Node: {{ spock_node_name }}
+          - Port: {{ pgedge_port }} (separate from existing 5432)
+          - Container: {{ pgedge_container_name }}
+          - Data Dir: {{ pgedge_data_dir }}
+
+    - name: Open port 5433 in firewall (UFW)
+      community.general.ufw:
+        rule: allow
+        port: "5433"
+        proto: tcp
+        from_ip: "{{ item }}"
+        comment: "pgEdge Spock replication"
+      loop:
+        - 108.61.242.236  # US
+        - 46.224.81.217   # EU
+      when: ansible_facts['os_family'] == 'Debian'
+
+  roles:
+    - role: pgedge-postgres
+      tags: [postgres, pgedge, database]
+
+  post_tasks:
+    - name: Display pgEdge status
+      ansible.builtin.debug:
+        msg: |
+          pgEdge Postgres deployed on {{ inventory_hostname }}
+
+          Container: {{ pgedge_container_name }}
+          Port: {{ pgedge_port }}
+          Database: {{ pgedge_db }}
+
+          Next steps:
+          1. Verify container is running: docker ps | grep spock
+          2. Initialize Spock: ansible-playbook ... --tags spock
+          3. Migrate data from old postgres
+
+# =============================================================================
+# Spock Multi-Master Setup (run after all nodes are deployed)
+# =============================================================================
+- name: Configure Spock Multi-Master Replication
+  hosts: all
+  become: yes
+  tags: [spock, replication, never]
+  serial: 1
+  vars_files:
+    - ../group_vars/spock_billing.yml
+
+  vars:
+    spock_container: "{{ pgedge_container_name }}"
+    spock_port: "{{ pgedge_port }}"
+    spock_user: "{{ pgedge_user }}"
+    spock_db: "{{ pgedge_db }}"
+    psql_cmd: "/opt/pgedge/pg15/bin/psql -p {{ spock_port }} -U {{ spock_user }} -d {{ spock_db }}"
+
+  tasks:
+    - name: Check if Spock extension exists
+      ansible.builtin.shell: |
+        docker exec {{ spock_container }} {{ psql_cmd }} -t -c "SELECT 1 FROM pg_extension WHERE extname = 'spock';"
+      register: spock_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Spock extension
+      ansible.builtin.shell: |
+        docker exec {{ spock_container }} {{ psql_cmd }} -c "CREATE EXTENSION IF NOT EXISTS spock;"
+      when: spock_check.stdout | trim != '1'
+      register: spock_install
+      changed_when: "'CREATE EXTENSION' in spock_install.stdout"
+
+    - name: Grant replicator permissions
+      ansible.builtin.shell: |
+        docker exec {{ spock_container }} {{ psql_cmd }} -c "
+          GRANT ALL ON ALL TABLES IN SCHEMA public TO replicator;
+          GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO replicator;
+          GRANT USAGE ON SCHEMA public TO replicator;
+        "
+      changed_when: false
+
+    - name: Create Spock node
+      ansible.builtin.shell: |
+        docker exec {{ spock_container }} {{ psql_cmd }} -c "
+          SELECT spock.node_create(
+            node_name := '{{ spock_node_name }}',
+            dsn := '{{ spock_dsn }} password={{ spock_replicator_password }}'
+          );"
+      register: node_create
+      failed_when: node_create.rc != 0 and 'already exists' not in node_create.stderr
+      changed_when: node_create.rc == 0
+      no_log: true
+
+    - name: Add tables to replication set
+      ansible.builtin.shell: |
+        docker exec {{ spock_container }} {{ psql_cmd }} -c "
+          SELECT spock.repset_add_all_tables('default', ARRAY['public']);"
+      register: repset_add
+      failed_when: repset_add.rc != 0 and 'already member' not in repset_add.stderr
+      changed_when: "'repset_add_table' in repset_add.stdout"
+
+    - name: Create subscriptions to peer nodes
+      ansible.builtin.shell: |
+        docker exec {{ spock_container }} {{ psql_cmd }} -c "
+          SELECT spock.sub_create(
+            subscription_name := 'sub_from_{{ hostvars[item].spock_node_name }}',
+            provider_dsn := 'host={{ hostvars[item].ansible_host }} port={{ spock_port }} dbname={{ spock_db }} user=replicator password={{ spock_replicator_password }}',
+            synchronize_data := false
+          );"
+      loop: "{{ groups['all'] | difference([inventory_hostname]) }}"
+      when: hostvars[item].spock_node_name is defined
+      register: create_subs
+      failed_when: create_subs.rc != 0 and 'already exists' not in create_subs.stderr
+      changed_when: create_subs.rc == 0
+      no_log: true
+
+    - name: Verify Spock status
+      ansible.builtin.shell: |
+        docker exec {{ spock_container }} {{ psql_cmd }} -c "
+          SELECT * FROM spock.node;
+          SELECT * FROM spock.sub_show_status();"
+      register: spock_status
+      changed_when: false
+
+    - name: Display Spock status
+      ansible.builtin.debug:
+        var: spock_status.stdout_lines
+
+# =============================================================================
+# Status Check (quick health check)
+# =============================================================================
+- name: Check Spock Status
+  hosts: all
+  become: yes
+  tags: [status, never]
+  vars_files:
+    - ../group_vars/spock_billing.yml
+
+  vars:
+    spock_container: "{{ pgedge_container_name }}"
+    psql_cmd: "/opt/pgedge/pg15/bin/psql -p {{ pgedge_port }} -U {{ pgedge_user }} -d {{ pgedge_db }}"
+
+  tasks:
+    - name: Check container status
+      ansible.builtin.shell: |
+        docker ps --format "table {{'{{'}}.Names{{'}}'}}\t{{'{{'}}.Status{{'}}'}}" | grep -E "spock|NAME"
+      register: container_status
+      changed_when: false
+
+    - name: Display container status
+      ansible.builtin.debug:
+        var: container_status.stdout_lines
+
+    - name: Check Spock replication status
+      ansible.builtin.shell: |
+        docker exec {{ spock_container }} {{ psql_cmd }} -c "
+          SELECT subscription_name, status FROM spock.sub_show_status();" 2>/dev/null || echo "Spock not initialized"
+      register: spock_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display Spock status
+      ansible.builtin.debug:
+        var: spock_status.stdout_lines
+
+# =============================================================================
+# Data Migration (migrate from old postgres to Spock postgres)
+# =============================================================================
+- name: Migrate Data to Spock Postgres
+  hosts: vultr  # Run from US node only
+  become: yes
+  tags: [migrate, never]
+  vars_files:
+    - ../group_vars/spock_billing.yml
+
+  vars:
+    spock_container: "{{ pgedge_container_name }}"
+    old_container: "ciris-postgres"
+    psql_cmd: "/opt/pgedge/pg15/bin/psql -p {{ pgedge_port }} -U {{ pgedge_user }} -d {{ pgedge_db }}"
+
+  tasks:
+    - name: Export data from old postgres
+      ansible.builtin.shell: |
+        docker exec {{ old_container }} pg_dump -U postgres -Fc ciris_billing > /tmp/billing_migration_{{ ansible_date_time.epoch }}.dump
+      register: export_result
+
+    - name: Display export result
+      ansible.builtin.debug:
+        msg: "Exported to /tmp/billing_migration_{{ ansible_date_time.epoch }}.dump"
+
+    - name: Import data to Spock postgres
+      ansible.builtin.shell: |
+        docker cp /tmp/billing_migration_{{ ansible_date_time.epoch }}.dump {{ spock_container }}:/tmp/
+        docker exec {{ spock_container }} /opt/pgedge/pg15/bin/pg_restore -p {{ pgedge_port }} -U {{ pgedge_user }} -d {{ pgedge_db }} --clean --if-exists /tmp/billing_migration_{{ ansible_date_time.epoch }}.dump
+      register: import_result
+      failed_when: false  # pg_restore may have warnings
+
+    - name: Display import result
+      ansible.builtin.debug:
+        var: import_result.stdout_lines

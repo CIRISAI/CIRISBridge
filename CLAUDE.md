@@ -272,7 +272,106 @@ ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml          
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e    # 3. Create API key + agent
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test         # 4. Run e2e test
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down         # 5. Spin down
+
+# Spock Multi-Master Replication (migration in progress)
+ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml         # Deploy pgEdge containers
+ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml --tags spock    # Initialize Spock
+ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml --tags status   # Check status
+ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml --tags migrate  # Migrate data
 ```
+
+## Spock Multi-Master Replication (Migration)
+
+**Status: Preparation Complete - Pending Deployment**
+
+CIRISBridge is migrating from PostgreSQL native logical replication to pgEdge Spock for more robust multi-master support. Spock runs on port 5433 alongside existing postgres (5432) for safe side-by-side migration.
+
+### Why Spock?
+
+| Issue with Native Replication | Spock Solution |
+|-------------------------------|----------------|
+| Manual `origin=none` for loop prevention | Automatic origin tracking |
+| Last-write-wins only | Per-table conflict resolution |
+| Sequence collisions in multi-master | Built-in sequence offsets |
+| Brittle slot management | Native multi-master support |
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    SPOCK MULTI-MASTER BILLING                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────┐              ┌─────────────────────────┐      │
+│  │ US (Vultr)              │              │ EU (Hetzner)            │      │
+│  │ 108.61.242.236:5433     │◄────────────►│ 46.224.81.217:5433      │      │
+│  ├─────────────────────────┤   Spock      ├─────────────────────────┤      │
+│  │ Container:              │   Bi-dir     │ Container:              │      │
+│  │   ciris-billing-spock   │   Repl       │   ciris-billing-spock   │      │
+│  │ Node: billing-us        │              │ Node: billing-eu        │      │
+│  │ Sequences: odd (1,3,5)  │              │ Sequences: even (1M+)   │      │
+│  └─────────────────────────┘              └─────────────────────────┘      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `ansible/roles/pgedge-postgres/` | pgEdge container deployment role |
+| `ansible/group_vars/spock_billing.yml` | Spock configuration (conflict resolution, sequences) |
+| `ansible/host_vars/vultr.yml` | US node Spock settings |
+| `ansible/host_vars/hetzner.yml` | EU node Spock settings |
+| `ansible/playbooks/spock-billing.yml` | Deployment and initialization playbook |
+
+### Migration Steps
+
+1. **Deploy pgEdge containers** (both nodes):
+   ```bash
+   ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml
+   ```
+
+2. **Initialize Spock replication** (creates nodes and subscriptions):
+   ```bash
+   ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml --tags spock
+   ```
+
+3. **Verify replication status**:
+   ```bash
+   ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml --tags status
+   ```
+
+4. **Migrate data from old postgres**:
+   ```bash
+   ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml --tags migrate
+   ```
+
+5. **Switch billing service to new postgres** (update DATABASE_URL to port 5433)
+
+6. **Decommission old postgres** (after validation period)
+
+### Manual Verification
+
+```bash
+# Check Spock status on US
+ssh root@108.61.242.236 "docker exec ciris-billing-spock /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing -c \"SELECT * FROM spock.sub_show_status();\""
+
+# Check Spock status on EU
+ssh root@46.224.81.217 "docker exec ciris-billing-spock /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing -c \"SELECT * FROM spock.sub_show_status();\""
+
+# Expected output: status = 'replicating' for each subscription
+```
+
+### Conflict Resolution Strategy
+
+| Table | Strategy | Rationale |
+|-------|----------|-----------|
+| users | last_update_wins | User metadata can be updated |
+| credits | last_update_wins | Credit balances are mutable |
+| charges | first_update_wins | Charges are immutable once created |
+| transactions | first_update_wins | Transaction records are immutable |
+| api_keys | last_update_wins | API keys can be rotated/updated |
 
 ## Billing Update Lifecycle
 
