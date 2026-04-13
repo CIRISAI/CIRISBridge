@@ -88,9 +88,9 @@
   vars:
     spock_container: "{{ pgedge_container_name }}"
     spock_port: "{{ pgedge_port }}"
-    spock_user: "{{ pgedge_user }}"
+    spock_admin_user: "pgedge_init"  # Superuser for extension and node management
     spock_db: "{{ pgedge_db }}"
-    psql_cmd: "/opt/pgedge/pg15/bin/psql -p {{ spock_port }} -U {{ spock_user }} -d {{ spock_db }}"
+    psql_cmd: "/opt/pgedge/pg15/bin/psql -p {{ spock_port }} -U {{ spock_admin_user }} -d {{ spock_db }}"
 
   tasks:
     - name: Check if Spock extension exists

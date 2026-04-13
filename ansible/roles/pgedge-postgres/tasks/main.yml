@@ -6,14 +6,14 @@
 
 - name: Create pgEdge directories
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: "{{ item.path }}"
     state: directory
     mode: '0755'
-    owner: root
-    group: root
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
   loop:
-    - /opt/ciris/pgedge-billing
-    - "{{ pgedge_data_dir }}"
+    - { path: /opt/ciris/pgedge-billing, owner: root, group: root }
+    - { path: "{{ pgedge_data_dir }}", owner: "1020", group: "1020" }  # pgedge user inside container
 
 - name: Check if pgEdge container exists
   community.docker.docker_container_info:
@@ -33,7 +33,7 @@
       POSTGRES_DB: "{{ pgedge_db }}"
       PGPORT: "{{ pgedge_port | string }}"
     volumes:
-      - "{{ pgedge_data_dir }}:/home/pgedge/data"
+      - "{{ pgedge_data_dir }}:/data/pgdata"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U {{ pgedge_user }} -d {{ pgedge_db }} -p {{ pgedge_port }}"]
       interval: 10s
@@ -42,6 +42,24 @@
       start_period: 30s
   register: pgedge_deploy
   notify: Restart pgEdge postgres
+
+- name: Wait for initial container startup
+  ansible.builtin.pause:
+    seconds: 15
+
+- name: Fix postgresql.conf port if needed
+  ansible.builtin.lineinfile:
+    path: "{{ pgedge_data_dir }}/postgresql.conf"
+    regexp: '^port = '
+    line: "port = {{ pgedge_port }}\t\t\t\t# (change requires restart)"
+  register: port_fix
+
+- name: Restart container if port was fixed
+  community.docker.docker_container:
+    name: "{{ pgedge_container_name }}"
+    state: started
+    restart: true
+  when: port_fix.changed
 
 - name: Wait for pgEdge postgres to be ready
   ansible.builtin.wait_for:
