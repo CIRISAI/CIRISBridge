@@ -55,6 +55,14 @@
     group: root
   when: inventory_hostname == 'vultr'
 
+- name: Deploy Spock billing backup script
+  ansible.builtin.template:
+    src: ciris-spock-backup.sh.j2
+    dest: /opt/ciris/scheduler/ciris-spock-backup.sh
+    mode: "0750"
+    owner: root
+    group: root
+
 # ============================================================================
 # DEPLOY SYSTEMD SERVICES
 # ============================================================================
@@ -92,6 +100,13 @@
     dest: /etc/systemd/system/ciris-lens-backup.service
     mode: "0644"
   when: inventory_hostname == 'vultr'
+  notify: Reload systemd
+
+- name: Deploy Spock billing backup service
+  ansible.builtin.template:
+    src: ciris-spock-backup.service.j2
+    dest: /etc/systemd/system/ciris-spock-backup.service
+    mode: "0644"
   notify: Reload systemd
 
 # ============================================================================
@@ -143,6 +158,15 @@
     - Reload systemd
     - Enable lens backup timer
 
+- name: Deploy Spock billing backup timer
+  ansible.builtin.template:
+    src: ciris-spock-backup.timer.j2
+    dest: /etc/systemd/system/ciris-spock-backup.timer
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Enable spock backup timer
+
 # ============================================================================
 # ENSURE TIMERS ARE ENABLED AND STARTED
 # ============================================================================
@@ -165,6 +189,13 @@
     enabled: true
     daemon_reload: true
   when: inventory_hostname == 'vultr'
+
+- name: Ensure Spock billing backup timer is enabled
+  ansible.builtin.systemd:
+    name: ciris-spock-backup.timer
+    state: started
+    enabled: true
+    daemon_reload: true
 
 # ============================================================================
 # INITIAL HEARTBEAT TEST

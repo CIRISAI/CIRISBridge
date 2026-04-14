@@ -14,7 +14,7 @@
 
 # Billing API
 billing1.{{ dns_soa }} {
-    reverse_proxy ciris-billing:8000 {
+    reverse_proxy host.docker.internal:8000 {
         health_uri /health
         health_interval 30s
     }
@@ -59,7 +59,7 @@ llm01.{{ dns_soa }} {
 {% if inventory_hostname == 'vultr' %}
 # Agents endpoint (US only, same as billing for now)
 agents.{{ dns_soa }} {
-    reverse_proxy ciris-billing:8000 {
+    reverse_proxy host.docker.internal:8000 {
         health_uri /health
         health_interval 30s
     }
@@ -146,7 +146,7 @@ llm.ciris.ai {
 
 billing.ciris.ai {
     # Auto-provision cert via ACME (old cert expired Jan 7)
-    reverse_proxy ciris-billing:8000 {
+    reverse_proxy host.docker.internal:8000 {
         health_uri /health
         health_interval 30s
     }

@@ -5,18 +5,18 @@ services:
     image: {{ billing_image }}
     container_name: ciris-billing
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:{{ billing_port }}:8000"
     env_file:
       - .env
     volumes:
       - /var/log/ciris/billing:/app/logs
 {% if ciris_environment | default('production') == 'test' %}
+    ports:
+      - "127.0.0.1:{{ billing_port }}:8000"
     networks:
       - billing
 {% else %}
-    networks:
-      - ciris
+    # Production: Use host networking for direct access to Spock postgres (127.0.0.1:5433)
+    network_mode: host
 {% endif %}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -25,12 +25,8 @@ services:
       retries: 3
       start_period: 30s
 
-networks:
 {% if ciris_environment | default('production') == 'test' %}
+networks:
   billing:
     driver: bridge
-{% else %}
-  ciris:
-    external: true
-    name: postgres_ciris
 {% endif %}

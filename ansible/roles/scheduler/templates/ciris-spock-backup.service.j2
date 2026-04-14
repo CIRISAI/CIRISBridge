@@ -1,0 +1,10 @@
+[Unit]
+Description=Spock Billing Daily Backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ciris/scheduler/ciris-spock-backup.sh
+StandardOutput=journal
+StandardError=journal

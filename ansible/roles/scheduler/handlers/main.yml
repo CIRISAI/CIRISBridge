@@ -38,3 +38,9 @@
     name: ciris-lens-backup.timer
     enabled: true
     state: started
+
+- name: Enable spock backup timer
+  ansible.builtin.systemd:
+    name: ciris-spock-backup.timer
+    enabled: true
+    state: started

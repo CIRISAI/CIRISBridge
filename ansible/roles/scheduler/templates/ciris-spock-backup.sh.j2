@@ -1,0 +1,197 @@
+#!/bin/bash
+# CIRISBridge Spock Postgres Daily Backup
+# Creates pg_dump of billing database from pgEdge Spock container, retains last 7 days
+# Runs on both nodes (multi-master = both have complete data)
+# Managed by Ansible - do not edit manually
+
+set -euo pipefail
+
+LENS_ENDPOINT="{{ cirislens_endpoint }}/lens-api/api/v1/logs/ingest"
+SERVICE_TOKEN="{{ scheduler_service_token }}"
+NODE_NAME="{{ node_name }}"
+
+# Backup settings
+BACKUP_DIR="/data/backups/spock-billing"
+RETENTION_DAYS=7
+CONTAINER_NAME="{{ pgedge_container_name | default('ciris-billing-spock') }}"
+DB_NAME="{{ pgedge_db | default('ciris_billing') }}"
+DB_USER="{{ pgedge_user | default('billing') }}"
+DB_PORT="{{ pgedge_port | default('5433') }}"
+PSQL_CMD="/opt/pgedge/pg15/bin/psql"
+PGDUMP_CMD="/opt/pgedge/pg15/bin/pg_dump"
+
+log_to_lens() {
+  local level="$1"
+  local message="$2"
+  local event="$3"
+  local metadata="$4"
+
+  curl -s -X POST "${LENS_ENDPOINT}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${SERVICE_TOKEN}" \
+    -d "{
+      \"service_name\": \"ciris-scheduler\",
+      \"level\": \"${level}\",
+      \"message\": \"${message}\",
+      \"event\": \"${event}\",
+      \"node\": \"${NODE_NAME}\",
+      \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\",
+      \"metadata\": ${metadata}
+    }" \
+    --connect-timeout 5 \
+    --max-time 10 \
+    >/dev/null 2>&1 || true
+}
+
+echo "=== Spock Billing Daily Backup - ${NODE_NAME} - $(date -u) ==="
+
+# ============================================================================
+# PRE-FLIGHT CHECKS
+# ============================================================================
+echo ""
+echo "--- Pre-flight Checks ---"
+
+# Check if Spock container is running
+if ! docker ps --format '{% raw %}{{.Names}}{% endraw %}' | grep -q "^${CONTAINER_NAME}$"; then
+  echo "INFO: Spock container not running on ${NODE_NAME} - skipping backup"
+  log_to_lens "INFO" "Spock backup skipped: container not running" "spock_backup_skipped" "{\"reason\": \"container_not_running\"}"
+  exit 0
+fi
+echo "Spock container: running"
+
+# Create backup directory
+mkdir -p "$BACKUP_DIR"
+echo "Backup directory: $BACKUP_DIR"
+
+# Check disk space (need at least 500MB free)
+DISK_FREE_KB=$(df "$BACKUP_DIR" | awk 'NR==2 {print $4}')
+if [ "$DISK_FREE_KB" -lt 524288 ]; then
+  echo "ERROR: Insufficient disk space (< 500MB free)"
+  log_to_lens "ERROR" "Spock backup failed: insufficient disk space" "spock_backup_failed" "{\"reason\": \"low_disk_space\", \"free_kb\": ${DISK_FREE_KB}}"
+  exit 1
+fi
+echo "Disk space: $(echo "$DISK_FREE_KB" | awk '{printf "%.1f GB", $1/1048576}') available"
+
+# Verify database is accessible
+if ! docker exec "$CONTAINER_NAME" $PSQL_CMD -U "$DB_USER" -p "$DB_PORT" -d "$DB_NAME" -c "SELECT 1;" >/dev/null 2>&1; then
+  echo "ERROR: Cannot connect to database"
+  log_to_lens "ERROR" "Spock backup failed: database connection failed" "spock_backup_failed" "{\"reason\": \"db_connection_failed\"}"
+  exit 1
+fi
+echo "Database connection: OK"
+
+# ============================================================================
+# CHECK SPOCK REPLICATION STATUS
+# ============================================================================
+echo ""
+echo "--- Spock Replication Status ---"
+
+SPOCK_STATUS=$(docker exec "$CONTAINER_NAME" $PSQL_CMD -U "$DB_USER" -p "$DB_PORT" -d "$DB_NAME" -t -c \
+  "SELECT string_agg(status, ', ') FROM spock.sub_show_status();" 2>/dev/null | xargs || echo "")
+
+if [ -n "$SPOCK_STATUS" ] && [ "$SPOCK_STATUS" != "" ]; then
+  echo "Subscription status: $SPOCK_STATUS"
+else
+  echo "Spock status: not configured, no subscriptions, or no permission"
+fi
+
+# ============================================================================
+# CREATE BACKUP
+# ============================================================================
+echo ""
+echo "--- Creating Backup ---"
+
+TIMESTAMP=$(date -u '+%Y%m%d_%H%M%S')
+BACKUP_FILE="spock_billing_${NODE_NAME}_${TIMESTAMP}.sql.gz"
+BACKUP_PATH="${BACKUP_DIR}/${BACKUP_FILE}"
+
+# Get database size before backup
+DB_SIZE=$(docker exec "$CONTAINER_NAME" $PSQL_CMD -U "$DB_USER" -p "$DB_PORT" -d "$DB_NAME" -t -c \
+  "SELECT pg_size_pretty(pg_database_size('${DB_NAME}'));" 2>/dev/null | xargs)
+echo "Database size: $DB_SIZE"
+
+# Create backup with compression
+echo "Creating backup: $BACKUP_FILE"
+START_TIME=$(date +%s)
+
+if docker exec "$CONTAINER_NAME" $PGDUMP_CMD -U "$DB_USER" -p "$DB_PORT" -d "$DB_NAME" \
+  --no-owner \
+  --no-acl \
+  --format=plain | gzip > "$BACKUP_PATH"; then
+
+  END_TIME=$(date +%s)
+  DURATION=$((END_TIME - START_TIME))
+  BACKUP_SIZE=$(ls -lh "$BACKUP_PATH" | awk '{print $5}')
+
+  echo "Backup completed in ${DURATION}s"
+  echo "Backup size: $BACKUP_SIZE"
+
+  # Verify backup integrity
+  echo ""
+  echo "--- Verifying Backup ---"
+  if gzip -t "$BACKUP_PATH" 2>/dev/null; then
+    echo "Compression: valid"
+  else
+    echo "ERROR: Backup file is corrupt"
+    rm -f "$BACKUP_PATH"
+    log_to_lens "ERROR" "Spock backup failed: corrupt file" "spock_backup_failed" "{\"reason\": \"corrupt_backup\"}"
+    exit 1
+  fi
+
+  # Check if file has content
+  UNCOMPRESSED_SIZE=$(gzip -l "$BACKUP_PATH" | awk 'NR==2 {print $2}')
+  if [ "$UNCOMPRESSED_SIZE" -lt 1000 ]; then
+    echo "WARNING: Backup seems unusually small (${UNCOMPRESSED_SIZE} bytes)"
+  else
+    echo "Uncompressed size: $(echo "$UNCOMPRESSED_SIZE" | awk '{printf "%.1f MB", $1/1048576}')"
+  fi
+
+  # Create checksum
+  CHECKSUM=$(sha256sum "$BACKUP_PATH" | awk '{print $1}')
+  echo "$CHECKSUM" > "${BACKUP_PATH}.sha256"
+  echo "Checksum: ${CHECKSUM:0:16}..."
+
+else
+  echo "ERROR: Backup failed"
+  rm -f "$BACKUP_PATH"
+  log_to_lens "ERROR" "Spock backup failed: pg_dump error" "spock_backup_failed" "{\"reason\": \"pg_dump_failed\"}"
+  exit 1
+fi
+
+# ============================================================================
+# CLEANUP OLD BACKUPS
+# ============================================================================
+echo ""
+echo "--- Cleaning Old Backups ---"
+
+BEFORE_COUNT=$(find "$BACKUP_DIR" -name "spock_billing_*.sql.gz" | wc -l)
+find "$BACKUP_DIR" -name "spock_billing_*.sql.gz" -mtime +${RETENTION_DAYS} -delete
+find "$BACKUP_DIR" -name "spock_billing_*.sql.gz.sha256" -mtime +${RETENTION_DAYS} -delete
+AFTER_COUNT=$(find "$BACKUP_DIR" -name "spock_billing_*.sql.gz" | wc -l)
+DELETED=$((BEFORE_COUNT - AFTER_COUNT))
+
+echo "Retention policy: ${RETENTION_DAYS} days"
+echo "Backups deleted: $DELETED"
+echo "Backups remaining: $AFTER_COUNT"
+
+# List current backups
+echo ""
+echo "--- Current Backups ---"
+ls -lh "$BACKUP_DIR"/spock_billing_*.sql.gz 2>/dev/null | tail -5 || echo "No backups found"
+
+# ============================================================================
+# SUMMARY
+# ============================================================================
+echo ""
+echo "=== Backup Summary ==="
+echo "Node: $NODE_NAME"
+echo "Database: $DB_NAME ($DB_SIZE)"
+echo "Backup file: $BACKUP_FILE ($BACKUP_SIZE)"
+echo "Duration: ${DURATION}s"
+echo "Retention: ${RETENTION_DAYS} days (${AFTER_COUNT} backups)"
+echo "Spock status: ${SPOCK_STATUS:-N/A}"
+
+log_to_lens "INFO" "Spock billing backup completed successfully" "spock_backup_complete" "{\"database\": \"${DB_NAME}\", \"db_size\": \"${DB_SIZE}\", \"backup_size\": \"${BACKUP_SIZE}\", \"duration_seconds\": ${DURATION}, \"backups_retained\": ${AFTER_COUNT}, \"spock_status\": \"${SPOCK_STATUS:-N/A}\"}"
+
+echo ""
+echo "=== Spock billing backup complete ==="

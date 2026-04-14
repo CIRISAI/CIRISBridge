@@ -1,0 +1,10 @@
+[Unit]
+Description=Spock Billing Daily Backup Timer (03:00 UTC)
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -56,7 +56,8 @@
 # =============================================================================
 - name: Wait for Billing to be ready
   ansible.builtin.uri:
-    url: "http://localhost:{{ billing_port }}/health"
+    # Production uses host networking (port 8000), test uses bridge networking (billing_port)
+    url: "http://localhost:{{ (ciris_environment | default('production') == 'test') | ternary(billing_port, '8000') }}/health"
     status_code: 200
   register: health_result
   retries: 15
@@ -79,7 +80,8 @@
 # =============================================================================
 - name: "SMOKE TEST: Verify health endpoint returns healthy"
   ansible.builtin.uri:
-    url: "http://localhost:{{ billing_port }}/health"
+    # Production uses host networking (port 8000), test uses bridge networking (billing_port)
+    url: "http://localhost:{{ (ciris_environment | default('production') == 'test') | ternary(billing_port, '8000') }}/health"
     status_code: 200
     return_content: yes
   register: smoke_health

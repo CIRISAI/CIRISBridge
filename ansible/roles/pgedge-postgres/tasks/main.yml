@@ -93,6 +93,14 @@
   changed_when: "'CREATE ROLE' in create_replicator.stdout"
   no_log: true
 
+- name: Grant billing user access to spock schema (for backup monitoring)
+  ansible.builtin.shell: |
+    docker exec {{ pgedge_container_name }} /opt/pgedge/pg15/bin/psql -U pgedge_init -p {{ pgedge_port }} -d {{ pgedge_db }} -c "
+      GRANT USAGE ON SCHEMA spock TO {{ pgedge_user }};
+      GRANT SELECT ON ALL TABLES IN SCHEMA spock TO {{ pgedge_user }};
+    " 2>/dev/null || true
+  changed_when: false
+
 - name: Display pgEdge status
   ansible.builtin.debug:
     msg: |
