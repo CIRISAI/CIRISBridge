@@ -35,7 +35,7 @@ billing1.{{ dns_soa }} {
 # LLM Proxy (primary endpoint)
 llm01.{{ dns_soa }} {
 {% if proxy_enabled | default(true) %}
-    reverse_proxy ciris-proxy:{{ proxy_port }} {
+    reverse_proxy ciris-proxy:4000 {
         health_uri /health/liveliness
         health_interval 30s
     }
@@ -129,7 +129,7 @@ lens.{{ dns_soa }} {
 
 llm.ciris.ai {
     tls /opt/ciris/caddy/certs/llm.ciris.ai.fullchain.pem /opt/ciris/caddy/certs/llm.ciris.ai.privkey.pem
-    reverse_proxy ciris-proxy:{{ proxy_port }}
+    reverse_proxy ciris-proxy:4000
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
