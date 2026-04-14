@@ -40,3 +40,26 @@
   retries: 15
   delay: 5
   until: result.status == 200
+
+# =============================================================================
+# SMOKE TEST: Verify critical connectivity after deployment
+# =============================================================================
+- name: "SMOKE TEST: Verify proxy can reach billing API"
+  ansible.builtin.command:
+    cmd: docker exec ciris-proxy python -c "import httpx; r = httpx.get('http://host.docker.internal:8000/health', timeout=10); print(r.json()); assert r.status_code == 200 and r.json()['status'] == 'healthy'"
+  register: billing_connectivity
+  changed_when: false
+  failed_when: billing_connectivity.rc != 0
+
+- name: "SMOKE TEST: Verify billing database is connected"
+  ansible.builtin.assert:
+    that:
+      - "'connected' in billing_connectivity.stdout"
+    fail_msg: "Proxy cannot verify billing database connectivity - this will cause 500 errors on LLM requests!"
+
+- name: Log successful proxy deployment
+  ansible.builtin.debug:
+    msg: |
+      Proxy deployment successful on {{ inventory_hostname }}
+      - Proxy health: OK
+      - Billing connectivity: OK ({{ billing_connectivity.stdout | trim }})
