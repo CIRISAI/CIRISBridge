@@ -464,6 +464,7 @@ Operational runbooks for incident response and infrastructure management are in 
 | Runbook | Purpose |
 |---------|---------|
 | `test-env.yml` | Spin up/down full e2e test stack (~$42/mo when running, $0 when destroyed) |
+| `e2e-smoke-test.yml` | Production e2e smoke test with Google OAuth (requires refresh token setup) |
 
 ### Common Runbook Commands
 
@@ -531,6 +532,9 @@ ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down       #
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags status     # Health check
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e  # Create API key + agent
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test       # Run e2e test
+
+# Production E2E Smoke Test (requires: e2e_google_refresh_token in vault)
+ansible-playbook -i inventory/production.yml runbooks/e2e-smoke-test.yml       # Test both regions
 ```
 
 ### Severity Levels

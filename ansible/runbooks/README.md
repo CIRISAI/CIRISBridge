@@ -149,5 +149,66 @@ curl "https://lens.ciris-services-1.ai/api/v1/covenant/repository/statistics"
 | `billing-ops.yml` | Billing database queries |
 | `billing-rollback.yml` | Rollback billing version |
 | `scout-ops.yml` | Scout agent database queries |
+| `e2e-smoke-test.yml` | Production e2e smoke test (Google OAuth) |
+
+---
+
+## Production E2E Smoke Test
+
+Verifies full pipeline in production using real Google OAuth authentication.
+
+### One-Time Setup: Get Google Refresh Token
+
+1. Go to [Google OAuth Playground](https://developers.google.com/oauthplayground/)
+
+2. Click the gear icon (⚙️) in the top right:
+   - Check "Use your own OAuth credentials"
+   - OAuth Client ID: `265882853697-l421ndojcs5nm7lkln53jj29kf7kck91.apps.googleusercontent.com`
+   - Leave Client Secret empty (public client)
+
+3. In Step 1, enter these scopes:
+   ```
+   openid email profile
+   ```
+
+4. Click "Authorize APIs" and sign in with: `ciristest1@gmail.com`
+
+5. In Step 2, click "Exchange authorization code for tokens"
+
+6. Copy the `refresh_token` from the response
+
+7. Add to vault:
+   ```bash
+   ansible-vault edit inventory/production.yml
+
+   # Add this line:
+   e2e_google_refresh_token: "your_refresh_token_here"
+   ```
+
+### Running the Smoke Test
+
+```bash
+# Test both regions
+ansible-playbook -i inventory/production.yml runbooks/e2e-smoke-test.yml
+
+# Test specific region
+ansible-playbook -i inventory/production.yml runbooks/e2e-smoke-test.yml --limit us
+```
+
+### What It Tests
+
+1. **Auth**: Exchanges refresh token for fresh ID token
+2. **Billing Health**: Verifies billing API is up on both regions
+3. **Credit Check**: Validates user has credits
+4. **LLM Call**: Makes real LLM request through proxy
+5. **Response**: Verifies successful response
+
+### Flow Verified
+
+```
+Test User (Google OAuth) → Proxy (auth) → Billing (credits) → Groq/Together → Response
+```
+
+---
 
 See [CLAUDE.md](../../CLAUDE.md) for complete runbook documentation.

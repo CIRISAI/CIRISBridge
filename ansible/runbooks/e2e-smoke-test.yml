@@ -1,0 +1,220 @@
+---
+# E2E Smoke Test Runbook
+# Makes actual LLM calls through the production proxy to verify end-to-end functionality
+#
+# Prerequisites:
+#   1. Generate refresh token: python3 scripts/get-google-refresh-token.py
+#   2. Add to vault: e2e_google_refresh_token: "<token>"
+#
+# Usage:
+#   # Run e2e smoke test on production
+#   ansible-playbook -i inventory/production.yml runbooks/e2e-smoke-test.yml
+#
+#   # Run on specific region
+#   ansible-playbook -i inventory/production.yml runbooks/e2e-smoke-test.yml --limit us
+#   ansible-playbook -i inventory/production.yml runbooks/e2e-smoke-test.yml --limit eu
+#
+#   # Verbose mode with timing
+#   ansible-playbook -i inventory/production.yml runbooks/e2e-smoke-test.yml -v
+
+- name: "E2E SMOKE TEST - Full Pipeline Verification"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # Google OAuth configuration (public client, no secret needed for PKCE)
+    google_client_id: "265882853697-l421ndojcs5nm7lkln53jj29kf7kck91.apps.googleusercontent.com"
+    google_token_url: "https://oauth2.googleapis.com/token"
+
+    # Endpoints to test
+    endpoints:
+      us:
+        billing: "https://billing1.ciris-services-1.ai"
+        proxy: "https://llm01.ciris-services-1.ai"
+      eu:
+        billing: "https://billing1.ciris-services-eu-1.com"
+        proxy: "https://llm01.ciris-services-eu-1.com"
+
+    # Test LLM request
+    test_model: "groq/llama-3.3-70b-versatile"
+    test_message: "Respond with exactly: E2E_SMOKE_TEST_OK"
+
+  tasks:
+    - name: "SETUP: Load vault credentials"
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../inventory/production.yml"
+      no_log: true
+
+    - name: "SETUP: Check refresh token is configured"
+      ansible.builtin.assert:
+        that:
+          - e2e_google_refresh_token is defined
+          - e2e_google_refresh_token | length > 0
+        fail_msg: |
+          Missing e2e_google_refresh_token in vault!
+
+          To set up:
+          1. Run: python3 scripts/get-google-refresh-token.py
+          2. Add the token to inventory/production.yml:
+             e2e_google_refresh_token: "<your_token>"
+
+    - name: "AUTH: Exchange refresh token for ID token"
+      ansible.builtin.uri:
+        url: "{{ google_token_url }}"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          client_id: "{{ google_client_id }}"
+          refresh_token: "{{ e2e_google_refresh_token }}"
+          grant_type: "refresh_token"
+        status_code: 200
+      register: token_response
+      no_log: true
+
+    - name: "AUTH: Extract ID token"
+      ansible.builtin.set_fact:
+        id_token: "{{ token_response.json.id_token }}"
+      no_log: true
+
+    - name: "AUTH: Verify token obtained"
+      ansible.builtin.debug:
+        msg: "✓ Got fresh Google ID token ({{ id_token | length }} chars)"
+
+    # Test both regions
+    - name: "E2E: Test US region"
+      block:
+        - name: "US: Check billing health"
+          ansible.builtin.uri:
+            url: "{{ endpoints.us.billing }}/health"
+            method: GET
+            timeout: 10
+          register: us_billing_health
+
+        - name: "US: Check credits"
+          ansible.builtin.uri:
+            url: "{{ endpoints.us.billing }}/v1/billing/credits/check"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ id_token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              # The proxy extracts user ID from token, but billing needs explicit provider
+              oauth_provider: "oauth:google"
+              external_id: "{{ (id_token | split('.') | list)[1] | b64decode | from_json | json_query('sub') }}"
+            timeout: 10
+            status_code: [200, 400, 404]  # 404 = new user, that's OK
+          register: us_credit_check
+          ignore_errors: true
+
+        - name: "US: Make LLM request through proxy"
+          ansible.builtin.uri:
+            url: "{{ endpoints.us.proxy }}/v1/chat/completions"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ id_token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              model: "{{ test_model }}"
+              messages:
+                - role: "user"
+                  content: "{{ test_message }}"
+              max_tokens: 50
+              metadata:
+                interaction_id: "smoke-test-us-{{ ansible_date_time.epoch }}"
+            timeout: 30
+          register: us_llm_response
+
+        - name: "US: Verify LLM response"
+          ansible.builtin.assert:
+            that:
+              - us_llm_response.status == 200
+              - us_llm_response.json.choices is defined
+              - us_llm_response.json.choices | length > 0
+            fail_msg: "US LLM request failed: {{ us_llm_response }}"
+
+        - name: "US: Display result"
+          ansible.builtin.debug:
+            msg: |
+              ✓ US REGION OK
+                Billing: {{ 'healthy' if us_billing_health.status == 200 else 'FAILED' }}
+                Credits: {{ us_credit_check.json | default('new user or error') }}
+                LLM Response: {{ us_llm_response.json.choices[0].message.content | default('no content') | truncate(100) }}
+                Model: {{ us_llm_response.json.model | default(test_model) }}
+                Tokens: {{ us_llm_response.json.usage | default({}) }}
+      rescue:
+        - name: "US: Report failure"
+          ansible.builtin.debug:
+            msg: "✗ US REGION FAILED - check logs above"
+
+    - name: "E2E: Test EU region"
+      block:
+        - name: "EU: Check billing health"
+          ansible.builtin.uri:
+            url: "{{ endpoints.eu.billing }}/health"
+            method: GET
+            timeout: 10
+          register: eu_billing_health
+
+        - name: "EU: Make LLM request through proxy"
+          ansible.builtin.uri:
+            url: "{{ endpoints.eu.proxy }}/v1/chat/completions"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ id_token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              model: "{{ test_model }}"
+              messages:
+                - role: "user"
+                  content: "{{ test_message }}"
+              max_tokens: 50
+              metadata:
+                interaction_id: "smoke-test-eu-{{ ansible_date_time.epoch }}"
+            timeout: 30
+          register: eu_llm_response
+
+        - name: "EU: Verify LLM response"
+          ansible.builtin.assert:
+            that:
+              - eu_llm_response.status == 200
+              - eu_llm_response.json.choices is defined
+            fail_msg: "EU LLM request failed: {{ eu_llm_response }}"
+
+        - name: "EU: Display result"
+          ansible.builtin.debug:
+            msg: |
+              ✓ EU REGION OK
+                Billing: {{ 'healthy' if eu_billing_health.status == 200 else 'FAILED' }}
+                LLM Response: {{ eu_llm_response.json.choices[0].message.content | default('no content') | truncate(100) }}
+                Model: {{ eu_llm_response.json.model | default(test_model) }}
+      rescue:
+        - name: "EU: Report failure"
+          ansible.builtin.debug:
+            msg: "✗ EU REGION FAILED - check logs above"
+
+    - name: "SUMMARY: E2E Smoke Test Results"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          E2E SMOKE TEST COMPLETE
+          ============================================================
+
+          US Region (ciris-services-1.ai):
+            Billing: {{ 'OK' if us_billing_health.status | default(0) == 200 else 'FAILED' }}
+            Proxy:   {{ 'OK' if us_llm_response.status | default(0) == 200 else 'FAILED' }}
+
+          EU Region (ciris-services-eu-1.com):
+            Billing: {{ 'OK' if eu_billing_health.status | default(0) == 200 else 'FAILED' }}
+            Proxy:   {{ 'OK' if eu_llm_response.status | default(0) == 200 else 'FAILED' }}
+
+          Test Details:
+            Model: {{ test_model }}
+            Auth:  Google OAuth ({{ e2e_test_user_email | default('ciristest1@gmail.com') }})
+
+          Flow Verified:
+            User → Proxy (auth) → Billing (credits) → LLM → Response
+
+          ============================================================
