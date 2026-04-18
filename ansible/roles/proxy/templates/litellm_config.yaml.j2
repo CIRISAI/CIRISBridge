@@ -103,6 +103,19 @@ model_list:
       model: "together_ai/Qwen/Qwen2.5-72B-Instruct-Turbo"
       api_key: "os.environ/TOGETHER_API_KEY"
 
+  # Qwen 3.5-35B-A3B - MoE model, 35B total / 3B active params
+  # 262K context, fast inference due to small active params
+  # Pricing: $0.163/$0.90 per 1M tokens (OpenRouter)
+  - model_name: "qwen-3.5-35b"
+    litellm_params:
+      model: "openrouter/qwen/qwen3.5-35b-a3b"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+
+  - model_name: "openrouter/qwen-3.5-35b"
+    litellm_params:
+      model: "openrouter/qwen/qwen3.5-35b-a3b"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+
   # OpenAI (optional fallback)
   - model_name: "openai/gpt-4o-mini"
     litellm_params:
