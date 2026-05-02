@@ -276,7 +276,7 @@
               echo "Checking $image..."
               # Note: This only checks locally, not remote registry
             done
-            docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.CreatedAt}}" | grep -E "ciris|postgres|redis|caddy|constellation"
+            docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.CreatedAt}}" | grep -E "ciris|postgres|redis|caddy"
           register: packages
           changed_when: false
 

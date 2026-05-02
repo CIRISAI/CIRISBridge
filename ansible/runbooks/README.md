@@ -97,11 +97,11 @@ ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down
 Agent reasoning traces are publicly accessible (no auth required):
 
 ```bash
-# Get recent traces (PII scrubbed)
-curl "https://lens.ciris-services-1.ai/api/v1/covenant/repository/traces?limit=10"
+# Get recent traces (PII scrubbed) — canonical /accord/ prefix
+curl "https://lens.ciris-services-1.ai/api/v1/accord/repository/traces?limit=10"
 
-# Get covenant statistics
-curl "https://lens.ciris-services-1.ai/api/v1/covenant/repository/statistics"
+# Get statistics
+curl "https://lens.ciris-services-1.ai/api/v1/accord/repository/statistics"
 ```
 
 ### Configuration Files

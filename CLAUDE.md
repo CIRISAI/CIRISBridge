@@ -43,7 +43,7 @@ Agents cannot serve this mission if users cannot reach them. CIRISBridge provide
 | CIRISBilling | Credits, payments, user auth | `ghcr.io/cirisai/cirisbilling:latest` |
 | CIRISProxy | LLM routing with ZDR | `ghcr.io/cirisai/cirisproxy:latest` |
 | CIRISLens | Observability, log aggregation | `ghcr.io/cirisai/cirislens:latest` |
-| CIRISDNS | Authoritative DNS (Constellation) | `valeriansaliou/constellation:latest` |
+| ~~CIRISDNS~~ | ~~Authoritative DNS (Constellation)~~ — **decommissioned 2026-05-02** (Reticulum migration); containers stopped on both nodes, role preserved at `roles/constellation/` for reversibility | — |
 
 ### Sibling Repo Notes
 
@@ -197,7 +197,8 @@ These servers predate CIRISBridge and need DNS cutover. See `runbooks/legacy-mig
 | 53/udp,tcp | Constellation DNS | Public |
 | 80/tcp | HTTP | ACME challenges only |
 | 443/tcp | Caddy HTTPS | Public |
-| 5432/tcp | PostgreSQL | Internal + replication |
+| ~~5432/tcp~~ | ~~PostgreSQL legacy~~ | Decommissioned 2026-05-02 (Spock cutover); see Spock section |
+| 5433/tcp | PostgreSQL (pgEdge Spock — billing) | Internal + multi-master replication |
 | 6379/tcp | Redis | Internal only |
 | 8000/tcp | Billing API | Via Caddy |
 | 4000/tcp | Proxy API | Via Caddy |
@@ -211,17 +212,19 @@ The CIRISLens API exposes these routes (via `/lens-api/*` prefix which strips th
 - `/api/v1/logs/ingest` - Log ingestion (requires service token)
 - `/api/admin/*` - Admin endpoints (requires Google OAuth)
 
-**Public Covenant Repository Endpoints (no auth required):**
-These endpoints are accessible directly without the `/lens-api` prefix:
-- `/api/v1/covenant/repository/traces` - Agent reasoning traces (PII scrubbed)
-- `/api/v1/covenant/repository/statistics` - Aggregate covenant metrics
+**Public Accord Repository Endpoints (no auth required):**
+These endpoints are accessible directly without the `/lens-api` prefix.
+Canonical prefix is `/api/v1/accord/*` (renamed from `/covenant/*` in `sql/022_covenant_to_accord.sql`).
+The `/api/v1/covenant/*` paths still resolve as deprecated aliases (200 OK + DEPRECATED warning); use `/accord/` in all new code.
+- `/api/v1/accord/repository/traces` - Agent reasoning traces (PII scrubbed)
+- `/api/v1/accord/repository/statistics` - Aggregate metrics
 
 ```bash
 # Example: Get recent agent traces
-curl "https://lens.ciris-services-1.ai/api/v1/covenant/repository/traces?limit=10"
+curl "https://lens.ciris-services-1.ai/api/v1/accord/repository/traces?limit=10"
 
-# Example: Get covenant statistics
-curl "https://lens.ciris-services-1.ai/api/v1/covenant/repository/statistics"
+# Example: Get statistics
+curl "https://lens.ciris-services-1.ai/api/v1/accord/repository/statistics"
 ```
 
 Service tokens must be created in the `cirislens.service_tokens` table for billing/proxy to send logs.
@@ -280,11 +283,21 @@ ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml --tags 
 ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml --tags migrate  # Migrate data
 ```
 
-## Spock Multi-Master Replication (Migration)
+## Spock Multi-Master Replication
 
-**Status: Preparation Complete - Pending Deployment**
+**Status: ✅ Live (cutover ~April 28, 2026). Legacy postgres decommissioned 2026-05-02.**
 
-CIRISBridge is migrating from PostgreSQL native logical replication to pgEdge Spock for more robust multi-master support. Spock runs on port 5433 alongside existing postgres (5432) for safe side-by-side migration.
+Billing connects exclusively to `ciris-billing-spock:5433` (multi-master via pgEdge Spock).
+Bidirectional replication uses `spock.create_subscription`. Migrations replicate via
+`spock.replicate_ddl()` (CIRISBilling#5 fix, migration 0020+) — and the bridge billing
+role has a reconciliation task that adds any missed `public.*` tables to the `default`
+repset on every deploy as a safety net.
+
+The legacy `ciris-postgres:5432` container (and `ciris-pgbouncer:6432`) are stopped on
+both nodes. Compose project lives at `/opt/ciris/postgres/` for rollback during the
+30-day soak; final pg_dumps preserved at `/data/backups/legacy-postgres-decom/`. The
+postgres role and the native-replication setup play in `playbooks/site.yml` are
+commented out. After the soak: `docker compose down --volumes` and remove the role.
 
 ### Why Spock?
 
@@ -465,6 +478,11 @@ Operational runbooks for incident response and infrastructure management are in 
 |---------|---------|
 | `test-env.yml` | Spin up/down full e2e test stack (~$42/mo when running, $0 when destroyed) |
 | `e2e-smoke-test.yml` | Production e2e smoke test with Google OAuth (requires refresh token setup) |
+
+**Federation Bootstrap:**
+| Runbook | Purpose |
+|---------|---------|
+| `lens-steward-bootstrap.yml` | One-time: insert self-signed `lens-steward` row into `cirislens.federation_keys` (auto-applies V004). Wires up the federation directory's trust root so lens's `federation_mirror.put_public_key()` calls have a valid FK target. Idempotent. Runs via ephemeral python:3.12 container with persist v0.2.2 + dilithium-py. `--tags verify` for read-only state check. |
 
 ### Common Runbook Commands
 

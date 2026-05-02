@@ -98,9 +98,9 @@ services:
     environment:
       DATABASE_URL: postgresql://{{ lens_db_user | default('cirislens') }}:{{ lens_db_password | regex_replace('/', '%2F') }}@postgres:5432/{{ lens_db_name | default('cirislens') }}
       ENV: production
-      # OAuth for admin UI
-      GOOGLE_CLIENT_ID: {{ google_client_id | default('') }}
-      GOOGLE_CLIENT_SECRET: {{ google_client_secret | default('') }}
+      # OAuth for admin UI (lens reads OAUTH_*, not GOOGLE_*)
+      OAUTH_CLIENT_ID: {{ google_client_id | default('') }}
+      OAUTH_CLIENT_SECRET: {{ google_client_secret | default('') }}
 {% if ciris_environment | default('production') == 'test' %}
       OAUTH_CALLBACK_URL: https://lens-test.{{ primary_domain }}/api/admin/auth/callback
 {% else %}
@@ -138,9 +138,24 @@ services:
       EXA_HEALTH_URL: https://api.exa.ai/health
       # Scrub signing key for tamper-evident PII removal
       CIRISLENS_SCRUB_KEY_PATH: /app/keys/scrub_private.key
+      # Federation steward identity — Ed25519 seed used by persist's
+      # engine.steward_sign() hot path for federation_keys mirror writes.
+      # Bridge ran the lens-steward bootstrap (runbooks/lens-steward-bootstrap.yml)
+      # ahead of this rollout, so the FK target row exists in cirislens.federation_keys.
+      # STEWARD_KEY_ID defaults to "lens-steward" — only the path is required.
+      CIRISLENS_STEWARD_KEY_PATH: /app/keys/lens-steward.seed
+      # Scrubber v2 divergence log (persisted to host via /var/log/ciris/lens mount)
+      CIRISLENS_SCRUBBER_DIVERGENCE_LOG: /app/logs/scrubber_divergence.jsonl
+      # Persistent keyring for SoftwareSigner — guarantees stable lens identity across restarts
+      CIRIS_DATA_DIR: /var/lib/cirislens/keyring
+      # Phase 2a flag — ON for 61da62f capture (lens-side body_sha256_prefix
+      # added to PERSIST_DELEGATE_REJECT lines; cross-layer join key for v0.1.18).
+      CIRISLENS_USE_PERSIST_ENGINE: "true"
+      RUST_LOG: ciris_persist=warn
     volumes:
       - /var/log/ciris/lens:/app/logs
       - /opt/ciris/lens/keys:/app/keys:ro
+      - /data/cirislens/keyring:/var/lib/cirislens/keyring
     ports:
       - "127.0.0.1:8200:8000"
     networks:

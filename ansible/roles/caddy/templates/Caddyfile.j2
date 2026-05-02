@@ -73,16 +73,17 @@ agents.{{ dns_soa }} {
 }
 # CIRISLens - Observability (US node only)
 lens.{{ dns_soa }} {
-    # Public covenant API endpoints (no auth required)
-    # Includes: /api/v1/covenant/repository/* (traces, statistics)
-    #           /api/v1/covenant/events (trace ingestion from agents)
-    handle /api/v1/covenant/* {
+    # Public accord API endpoints (no auth required) — CANONICAL
+    # Includes: /api/v1/accord/repository/* (traces, statistics, registry, verification)
+    #           /api/v1/accord/events (trace ingestion from agents)
+    handle /api/v1/accord/* {
         reverse_proxy cirislens-api:8000
     }
 
-    # Public accord API endpoints (no auth required)
-    # Includes: /api/v1/accord/* (accord registry, verification)
-    handle /api/v1/accord/* {
+    # Deprecated alias — kept for backward compat with older agent clients.
+    # Lens responds 200 OK but logs a DEPRECATED WARN per request.
+    # Will be removed once all clients migrate to /api/v1/accord/*.
+    handle /api/v1/covenant/* {
         reverse_proxy cirislens-api:8000
     }
 

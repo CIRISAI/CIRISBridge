@@ -19,9 +19,9 @@ Each node runs the following containerized services:
 |---------|-----------|------|-------------|
 | CIRISBilling | `ciris-billing` | 8000 | Credits, payments, user authentication |
 | CIRISProxy | `ciris-proxy` | 4000 | LLM routing with billing integration |
-| PostgreSQL | `ciris-postgres` | 5432 | Database with bi-directional replication |
+| ~~PostgreSQL~~ | ~~`ciris-postgres`~~ | ~~5432~~ | **DECOMMISSIONED 2026-05-02** — replaced by Spock multi-master at `ciris-billing-spock:5433` |
 | Caddy | `ciris-caddy` | 80, 443 | TLS termination, reverse proxy |
-| Constellation | `ciris-dns` | 53 | Authoritative DNS |
+| ~~Constellation~~ | ~~`ciris-dns`~~ | ~~53~~ | **DECOMMISSIONED 2026-05-02** — Reticulum migration; containers stopped both nodes |
 
 Additionally, the US node runs:
 - **CIRISLens** (`ciris-lens`) - Centralized observability on port 8200
@@ -240,9 +240,11 @@ On each node:
 |------|----------|
 | `/opt/ciris/billing/` | Billing service docker-compose and env |
 | `/opt/ciris/proxy/` | Proxy service docker-compose and env |
-| `/opt/ciris/postgres/` | PostgreSQL docker-compose and data |
+| `/opt/ciris/postgres/` | ~~PostgreSQL~~ — DECOMMISSIONED 2026-05-02; final dumps at `/data/backups/legacy-postgres-decom/` |
+| `/opt/ciris/billing-spock/` | pgEdge Spock multi-master billing DB (replaces `/opt/ciris/postgres/`) |
 | `/opt/ciris/caddy/` | Caddy docker-compose and Caddyfile |
-| `/opt/ciris/dns/` | Constellation DNS config |
+| `/opt/ciris/dns/` | ~~Constellation DNS config~~ — DECOMMISSIONED 2026-05-02 (Reticulum migration); containers stopped, data volume retained |
+| `/opt/ciris/lens/` | CIRISLens (US only) — observability stack |
 | `/var/log/ciris/` | Service log directories |
 
 ## Contacts

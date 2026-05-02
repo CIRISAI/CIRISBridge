@@ -9,9 +9,14 @@
 {% if 'test_infra' in group_names %}
 # CIRISLens - Test Environment
 lens-test.{{ primary_domain }} {
-    # Public covenant repository endpoints (no auth required)
+    # Public accord repository endpoints (no auth required) — CANONICAL
     # These are served directly without the /lens-api prefix
-    handle /api/v1/covenant/repository/* {
+    handle /api/v1/accord/* {
+        reverse_proxy cirislens-api:8000
+    }
+
+    # Deprecated alias — kept for backward compat
+    handle /api/v1/covenant/* {
         reverse_proxy cirislens-api:8000
     }
 

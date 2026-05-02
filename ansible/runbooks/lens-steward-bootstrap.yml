@@ -1,0 +1,217 @@
+---
+# Lens Steward Federation Bootstrap
+# Inserts the self-signed `lens-steward` row into
+# cirislens.federation_keys, unblocking lens-side federation_mirror
+# put_public_key() calls (their FK target).
+#
+# Runs from the US node only (lens DB lives there). The python
+# environment is ephemeral via a `python:3.12-slim` container —
+# no host-level pip pollution.
+#
+# Idempotent: the bootstrap script skips insert if the row already exists.
+#
+# Usage:
+#   # Dry run (canonicalize + sign, but skip put_public_key)
+#   ansible-playbook -i inventory/production.yml runbooks/lens-steward-bootstrap.yml \
+#     --vault-password-file ~/.vault_pass \
+#     -e dry_run=true
+#
+#   # Real run
+#   ansible-playbook -i inventory/production.yml runbooks/lens-steward-bootstrap.yml \
+#     --vault-password-file ~/.vault_pass
+#
+#   # Verify row state (no insert)
+#   ansible-playbook -i inventory/production.yml runbooks/lens-steward-bootstrap.yml \
+#     --tags verify
+#
+# Background:
+#   - Bridge runs the bootstrap once, ahead of lens-api consuming
+#     ciris-persist>=0.2.2 with steward env vars wired up.
+#   - persist v0.2.2's Engine.new() auto-applies V004 (purely additive
+#     — only CREATEs new federation_* tables; no impact on the
+#     accord_public_keys path lens-api 0.1.x still writes to).
+#   - After this row exists, lens's federation_mirror.put_public_key()
+#     calls succeed (every other federation_keys row chains its
+#     scrub_key_id to lens-steward).
+#   - Pre-bootstrap registrations are NOT retroactively mirrored —
+#     handled separately by a run-once migrator (lens-side, deferred).
+#
+# Safety: the bootstrap row's scrub_key_id == key_id (self-signed),
+# satisfied by the schema's DEFERRABLE INITIALLY DEFERRED FK constraint.
+#
+# Cryptography:
+#   * Hot path: Ed25519 signed by persist's keyring-managed steward
+#     identity (engine.steward_sign).
+#   * Cold path: ML-DSA-65 signed by dilithium-py over (canonical ||
+#     classical_sig). dilithium-py is interoperable with the Rust
+#     ml-dsa = 0.1.0-rc.3 crate (used by CIRISVerify + persist's
+#     cold-path verifier) — empirically confirmed during prep.
+
+- name: "LENS STEWARD BOOTSTRAP — federation_keys self-signed root"
+  hosts: us
+  become: true
+  vars:
+    bootstrap_tmp: "/opt/ciris/lens/.steward-bootstrap"
+    container_image: "python:3.12-slim"
+    dry_run: false
+    bootstrap_script: "{{ playbook_dir }}/../../scripts/lens_steward_bootstrap.py"
+
+  tasks:
+
+    # ── Pre-flight ───────────────────────────────────────────────────
+    - name: Verify lens DB container is running
+      community.docker.docker_container_info:
+        name: cirislens-db
+      register: lens_db_info
+      failed_when:
+        - not (lens_db_info.exists | default(false))
+        - not (lens_db_info.container.State.Running | default(false))
+      tags: [verify, bootstrap]
+
+    - name: Inspect current federation_keys state (if V004 applied)
+      ansible.builtin.shell: |
+        docker exec -e PGPASSWORD={{ lens_db_password }} cirislens-db \
+          psql -U {{ lens_db_user | default('cirislens') }} \
+               -d {{ lens_db_name | default('cirislens') }} \
+               -tAc "SELECT
+                       (SELECT COUNT(*) FROM information_schema.tables
+                        WHERE table_schema='cirislens'
+                          AND table_name='federation_keys')::int AS v004_applied,
+                       (SELECT COUNT(*) FROM cirislens.federation_keys
+                        WHERE key_id='lens-steward')::int AS row_exists
+                     ;" 2>/dev/null \
+        || echo "0|0"
+      register: pre_state
+      changed_when: false
+      tags: [verify, bootstrap]
+
+    - name: Show current state
+      ansible.builtin.debug:
+        msg:
+          - "V004 applied: {{ pre_state.stdout_lines[-1].split('|')[0] | int == 1 }}"
+          - "lens-steward row exists: {{ pre_state.stdout_lines[-1].split('|')[1] | int == 1 }}"
+      tags: [verify, bootstrap]
+
+    - name: Stop after status check (verify mode)
+      ansible.builtin.meta: end_play
+      tags:
+        - never
+        - verify
+
+    # ── Stage key material ──────────────────────────────────────────
+    - name: Create bootstrap workdir
+      ansible.builtin.file:
+        path: "{{ bootstrap_tmp }}"
+        state: directory
+        mode: "0700"
+        owner: root
+        group: root
+      tags: [bootstrap]
+
+    - name: Stage lens-steward Ed25519 seed
+      ansible.builtin.copy:
+        content: "{{ lens_steward_ed25519_secret | b64decode }}"
+        dest: "{{ bootstrap_tmp }}/ed25519.seed"
+        mode: "0600"
+        owner: root
+        group: root
+      no_log: true
+      tags: [bootstrap]
+
+    - name: Stage lens-steward Ed25519 pubkey (sanity check)
+      ansible.builtin.copy:
+        content: "{{ lens_steward_ed25519_public | b64decode }}"
+        dest: "{{ bootstrap_tmp }}/ed25519.pub"
+        mode: "0600"
+        owner: root
+        group: root
+      no_log: true
+      tags: [bootstrap]
+
+    - name: Stage lens-steward ML-DSA-65 seed
+      ansible.builtin.copy:
+        content: "{{ lens_steward_mldsa_secret | b64decode }}"
+        dest: "{{ bootstrap_tmp }}/mldsa65.secret"
+        mode: "0600"
+        owner: root
+        group: root
+      no_log: true
+      tags: [bootstrap]
+
+    - name: Stage lens-steward ML-DSA-65 pubkey
+      ansible.builtin.copy:
+        content: "{{ lens_steward_mldsa_public | b64decode }}"
+        dest: "{{ bootstrap_tmp }}/mldsa65.pub"
+        mode: "0600"
+        owner: root
+        group: root
+      no_log: true
+      tags: [bootstrap]
+
+    - name: Stage bootstrap script
+      ansible.builtin.copy:
+        src: "{{ bootstrap_script }}"
+        dest: "{{ bootstrap_tmp }}/lens_steward_bootstrap.py"
+        mode: "0644"
+        owner: root
+        group: root
+      tags: [bootstrap]
+
+    # ── Run ──────────────────────────────────────────────────────────
+    - name: Run lens-steward bootstrap (ephemeral python:3.12 container)
+      ansible.builtin.shell: |
+        set -e
+        docker run --rm \
+          --network lens_cirislens \
+          -v {{ bootstrap_tmp }}:/work:ro \
+          -e LENS_DSN="postgresql://{{ lens_db_user | default('cirislens') }}:{{ lens_db_password | regex_replace('/', '%2F') }}@cirislens-db:5432/{{ lens_db_name | default('cirislens') }}" \
+          -e STEWARD_KEY_ID=lens-steward \
+          -e STEWARD_KEY_PATH=/work/ed25519.seed \
+          -e STEWARD_PUBKEY_PATH=/work/ed25519.pub \
+          -e STEWARD_MLDSA_SEED_PATH=/work/mldsa65.secret \
+          -e STEWARD_MLDSA_PUB_PATH=/work/mldsa65.pub \
+          -e IDENTITY_REF=lens \
+          -e ISSUER=ciris-bridge \
+          -e DRY_RUN={{ '1' if dry_run | bool else '0' }} \
+          {{ container_image }} \
+          bash -c '
+            set -e
+            pip install --quiet ciris-persist==0.2.2 dilithium-py psycopg[binary]
+            python /work/lens_steward_bootstrap.py
+          '
+      register: bootstrap_run
+      changed_when: "'inserted' in bootstrap_run.stdout"
+      tags: [bootstrap]
+
+    - name: Show bootstrap output
+      ansible.builtin.debug:
+        msg: "{{ bootstrap_run.stdout_lines }}"
+      tags: [bootstrap]
+
+    # ── Post-run verify ──────────────────────────────────────────────
+    - name: Read final federation_keys state
+      ansible.builtin.shell: |
+        docker exec -e PGPASSWORD={{ lens_db_password }} cirislens-db \
+          psql -U {{ lens_db_user | default('cirislens') }} \
+               -d {{ lens_db_name | default('cirislens') }} \
+               -c "SELECT key_id, identity_type, identity_ref,
+                          algorithm, scrub_key_id,
+                          pqc_completed_at IS NOT NULL AS pqc_done,
+                          length(persist_row_hash) AS row_hash_len
+                   FROM cirislens.federation_keys
+                   ORDER BY valid_from;"
+      register: final_state
+      changed_when: false
+      tags: [bootstrap]
+
+    - name: Show final state
+      ansible.builtin.debug:
+        msg: "{{ final_state.stdout_lines }}"
+      tags: [bootstrap]
+
+    # ── Cleanup ──────────────────────────────────────────────────────
+    - name: Remove bootstrap workdir (clears staged secrets)
+      ansible.builtin.file:
+        path: "{{ bootstrap_tmp }}"
+        state: absent
+      tags: [bootstrap]

@@ -96,8 +96,8 @@ CIRISBridge/
 │   ├── playbooks/      # Deployment playbooks
 │   └── roles/          # Service roles
 │       ├── common/     # Base OS setup
-│       ├── constellation/ # DNS
-│       ├── postgres/   # Database
+│       ├── constellation/ # DNS — DECOMMISSIONED 2026-05-02 (Reticulum migration)
+│       ├── postgres/   # Database — DECOMMISSIONED 2026-05-02 (Spock multi-master)
 │       ├── caddy/      # TLS
 │       ├── billing/    # CIRISBilling
 │       └── proxy/      # CIRISProxy

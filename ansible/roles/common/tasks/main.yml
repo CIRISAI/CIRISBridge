@@ -38,17 +38,22 @@
     port: "22"
     proto: tcp
 
-- name: Allow DNS (UDP)
-  community.general.ufw:
-    rule: allow
-    port: "53"
-    proto: udp
-
-- name: Allow DNS (TCP)
-  community.general.ufw:
-    rule: allow
-    port: "53"
-    proto: tcp
+# DECOMMISSIONED 2026-05-02: Port 53 was open for Constellation DNS, which has
+# been retired in favor of Reticulum. Re-enable if running an authoritative DNS
+# service on these nodes again. (Existing rules on the firewalls will be deleted
+# the next time `ufw delete` runs against them; for now they're harmless since
+# no process listens on :53.)
+# - name: Allow DNS (UDP)
+#   community.general.ufw:
+#     rule: allow
+#     port: "53"
+#     proto: udp
+#
+# - name: Allow DNS (TCP)
+#   community.general.ufw:
+#     rule: allow
+#     port: "53"
+#     proto: tcp
 
 - name: Allow HTTP (for ACME)
   community.general.ufw:

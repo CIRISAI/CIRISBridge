@@ -16,19 +16,31 @@
     - common
   tags: [common]
 
-- name: Deploy DNS (Constellation with GeoDNS)
-  hosts: all
-  become: true
-  roles:
-    - constellation
-  tags: [dns]
+# DECOMMISSIONED 2026-05-02: Constellation DNS replaced by Reticulum migration.
+# Containers stopped on both nodes; data volumes retained at /opt/ciris/dns/.
+# Zero traffic to cirisdns at decom time — all CIRIS domains delegate to
+# Cloudflare/Hetzner. Role remains on disk under roles/constellation/ for
+# reversibility; remove the role + this comment block + UFW 53 rules in
+# roles/common/tasks/main.yml after Reticulum is load-bearing.
+# - name: Deploy DNS (Constellation with GeoDNS)
+#   hosts: all
+#   become: true
+#   roles:
+#     - constellation
+#   tags: [dns]
 
-- name: Deploy PostgreSQL (bi-directional replication)
-  hosts: all
-  become: true
-  roles:
-    - postgres
-  tags: [postgres]
+# DECOMMISSIONED 2026-05-02: legacy ciris-postgres on port 5432 superseded by Spock
+# (ciris-billing-spock on 5433, multi-master). Containers stopped, data volumes
+# retained at /opt/ciris/postgres/data on each node. Final dumps preserved at
+# /data/backups/legacy-postgres-decom/ciris_billing_legacy_{us,eu}_20260502_*.sql.
+# Restore: `cd /opt/ciris/postgres && docker compose start` if needed.
+# Remove this play (and /opt/ciris/postgres) entirely after a 30-day soak.
+# - name: Deploy PostgreSQL (bi-directional replication)
+#   hosts: all
+#   become: true
+#   roles:
+#     - postgres
+#   tags: [postgres]
 
 - name: Deploy Caddy (TLS termination)
   hosts: all
@@ -65,44 +77,49 @@
     - scheduler
   tags: [scheduler]
 
-- name: Sync DNS records to Redis (both nodes)
-  hosts: all
-  become: true
-  tasks:
-    - name: Sync DNS records
-      ansible.builtin.script:
-        cmd: "{{ playbook_dir }}/../../scripts/sync-records.sh"
-      args:
-        creates: /var/log/ciris-dns-sync.log
-  tags: [dns-records]
+# DECOMMISSIONED 2026-05-02: scripts/sync-records.sh syncs zones.yaml to the
+# constellation Redis instance, which is no longer running. Reticulum migration
+# replaces this entirely.
+# - name: Sync DNS records to Redis (both nodes)
+#   hosts: all
+#   become: true
+#   tasks:
+#     - name: Sync DNS records
+#       ansible.builtin.script:
+#         cmd: "{{ playbook_dir }}/../../scripts/sync-records.sh"
+#       args:
+#         creates: /var/log/ciris-dns-sync.log
+#   tags: [dns-records]
 
 # =============================================================================
-# Post-deployment: Set up bi-directional replication
-# Run this AFTER both nodes are deployed and can reach each other
+# DECOMMISSIONED 2026-05-02: native logical replication on legacy ciris-postgres
+# is no longer the billing path. Spock multi-master (ciris-billing-spock on
+# port 5433) handles bidirectional replication via spock.create_subscription,
+# wired up in playbooks/spock-billing.yml --tags spock.
 # =============================================================================
-- name: Set up PostgreSQL bi-directional replication
-  hosts: all
-  become: true
-  serial: 1  # One node at a time to avoid race conditions
-  tasks:
-    - name: Check if subscription already exists
-      community.docker.docker_container_exec:
-        container: ciris-postgres
-        command: >
-          psql -U postgres -d ciris_billing -tAc
-          "SELECT COUNT(*) FROM pg_subscription WHERE subname LIKE 'ciris_sub_%';"
-      register: sub_count
-      changed_when: false
-
-    - name: Create subscription to peer node
-      community.docker.docker_container_exec:
-        container: ciris-postgres
-        command: >
-          psql -U postgres -d ciris_billing -c
-          "CREATE SUBSCRIPTION ciris_sub_from_{{ 'eu' if node_name == 'us' else 'us' }}
-           CONNECTION 'host={{ peer_ip }} port=5432 dbname=ciris_billing user=replicator password={{ replication_password }}'
-           PUBLICATION ciris_pub_{{ 'eu' if node_name == 'us' else 'us' }}
-           WITH (copy_data = false, origin = none);"
-      when: sub_count.stdout | trim == "0"
-      ignore_errors: true  # May fail if peer not ready yet
-  tags: [replication]
+# - name: Set up PostgreSQL bi-directional replication
+#   hosts: all
+#   become: true
+#   serial: 1
+#   tasks:
+#     - name: Check if subscription already exists
+#       community.docker.docker_container_exec:
+#         container: ciris-postgres
+#         command: >
+#           psql -U postgres -d ciris_billing -tAc
+#           "SELECT COUNT(*) FROM pg_subscription WHERE subname LIKE 'ciris_sub_%';"
+#       register: sub_count
+#       changed_when: false
+#
+#     - name: Create subscription to peer node
+#       community.docker.docker_container_exec:
+#         container: ciris-postgres
+#         command: >
+#           psql -U postgres -d ciris_billing -c
+#           "CREATE SUBSCRIPTION ciris_sub_from_{{ 'eu' if node_name == 'us' else 'us' }}
+#            CONNECTION 'host={{ peer_ip }} port=5432 dbname=ciris_billing user=replicator password={{ replication_password }}'
+#            PUBLICATION ciris_pub_{{ 'eu' if node_name == 'us' else 'us' }}
+#            WITH (copy_data = false, origin = none);"
+#       when: sub_count.stdout | trim == "0"
+#       ignore_errors: true
+#   tags: [replication]

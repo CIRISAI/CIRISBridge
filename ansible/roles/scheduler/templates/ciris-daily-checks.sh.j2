@@ -44,7 +44,10 @@ echo "--- Certificate Status Check ---"
 {% if node_name == 'us' %}
 DOMAINS="billing1.{{ primary_domain }} proxy1.{{ primary_domain }} agents.{{ primary_domain }} lens.{{ primary_domain }}"
 {% else %}
-DOMAINS="billing1.{{ secondary_domain }} proxy1.{{ secondary_domain }} agents.{{ secondary_domain }}"
+# EU uses ciris-services-eu-1.com; the legacy ciris-services-2.ai DNS is retired.
+# EU vhost set on Caddy: billing1, llm01 (EU proxy is named llm01 not proxy1),
+# and apex. proxy1.* and agents.* are .ai-only (geo-routed via Cloudflare).
+DOMAINS="billing1.{{ eu_domain | default('ciris-services-eu-1.com') }} llm01.{{ eu_domain | default('ciris-services-eu-1.com') }} {{ eu_domain | default('ciris-services-eu-1.com') }}"
 {% endif %}
 
 CERT_ISSUES=0
@@ -85,68 +88,66 @@ else
 fi
 
 # ============================================================================
-# BACKUP/REPLICATION STATUS CHECK
+# SPOCK BACKUP/REPLICATION STATUS CHECK
 # ============================================================================
+# Billing data lives on ciris-billing-spock (port 5433, multi-master via pgEdge
+# Spock). The legacy ciris-postgres (port 5432) was decommissioned 2026-05-02
+# — this check used to query it and was firing daily false-alarm
+# "Service Errors Detected" alerts.
 echo ""
-echo "--- PostgreSQL Replication Check ---"
+echo "--- Spock Replication Check ---"
 
 REPLICATION_OK=true
 REPLICATION_DETAILS=""
+LAG_MB=0
+PSQL_DOCKER="docker exec -e PGPASSWORD={{ billing_db_password }} ciris-billing-spock /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing -t"
 
-# Check if PostgreSQL container is running
-if docker ps --format '{% raw %}{{.Names}}{% endraw %}' | grep -q '^ciris-postgres$'; then
-  # Check replication status
-  REPL_STATUS=$(docker exec ciris-postgres psql -U postgres -d ciris -t -c "
-    SELECT
-      subname,
-      CASE WHEN subenabled THEN 'enabled' ELSE 'disabled' END as status
-    FROM pg_subscription;
-  " 2>/dev/null || echo "ERROR")
+if docker ps --format '{% raw %}{{.Names}}{% endraw %}' | grep -q '^ciris-billing-spock$'; then
+  # Subscription status — Spock catalog
+  SUB_STATUS=$($PSQL_DOCKER -A -c "SELECT status FROM spock.sub_show_status();" 2>/dev/null || echo "ERROR")
 
-  if echo "$REPL_STATUS" | grep -q "ERROR"; then
-    echo "WARNING: Cannot query replication status"
+  if [ "$SUB_STATUS" = "ERROR" ] || [ -z "$SUB_STATUS" ]; then
+    echo "WARNING: Cannot query spock.sub_show_status"
     REPLICATION_DETAILS="query_failed"
-  elif echo "$REPL_STATUS" | grep -q "disabled"; then
-    echo "CRITICAL: Replication subscription is disabled"
+  elif ! echo "$SUB_STATUS" | grep -q "replicating"; then
+    echo "CRITICAL: Spock subscription not in 'replicating' state: $SUB_STATUS"
     REPLICATION_OK=false
-    REPLICATION_DETAILS="subscription_disabled"
-  elif [ -z "$(echo "$REPL_STATUS" | tr -d '[:space:]')" ]; then
-    echo "WARNING: No replication subscription found"
-    REPLICATION_DETAILS="no_subscription"
+    REPLICATION_DETAILS="sub_state_${SUB_STATUS}"
   else
-    echo "OK: Replication subscription active"
+    echo "OK: Spock subscription replicating"
     REPLICATION_DETAILS="active"
   fi
 
-  # Check replication lag (if available)
-  LAG_STATUS=$(docker exec ciris-postgres psql -U postgres -d ciris -t -c "
-    SELECT COALESCE(
-      (SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint
-       FROM pg_replication_slots
-       WHERE slot_type = 'logical' LIMIT 1),
-      0
-    ) as lag_bytes;
-  " 2>/dev/null || echo "0")
-
-  LAG_BYTES=$(echo "$LAG_STATUS" | tr -d '[:space:]')
-  LAG_MB=$((LAG_BYTES / 1048576))
+  # Active Spock slot retention — bytes / MB
+  LAG_BYTES=$($PSQL_DOCKER -A -c "
+    SELECT COALESCE(MAX(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn))::bigint, 0)
+    FROM pg_replication_slots WHERE slot_name LIKE 'spk_%' AND active = true;
+  " 2>/dev/null | tr -d '[:space:]' || echo "0")
+  LAG_MB=$((${LAG_BYTES:-0} / 1048576))
 
   if [ "$LAG_MB" -gt 100 ]; then
-    echo "WARNING: Replication lag is ${LAG_MB}MB"
-    REPLICATION_DETAILS="${REPLICATION_DETAILS},lag_${LAG_MB}MB"
+    echo "WARNING: Spock slot retention ${LAG_MB}MB"
+    REPLICATION_DETAILS="${REPLICATION_DETAILS},retained_${LAG_MB}MB"
   else
-    echo "OK: Replication lag is ${LAG_MB}MB"
+    echo "OK: Spock slot retention ${LAG_MB}MB"
+  fi
+
+  # Orphan-slot canary — non-Spock slots that shouldn't exist post-cutover
+  ORPHANS=$($PSQL_DOCKER -A -c "SELECT COUNT(*) FROM pg_replication_slots WHERE slot_name NOT LIKE 'spk_%';" 2>/dev/null | tr -d '[:space:]' || echo "0")
+  if [ "${ORPHANS:-0}" -gt 0 ]; then
+    echo "WARNING: ${ORPHANS} non-Spock slot(s) found (post-cutover should be 0)"
+    REPLICATION_DETAILS="${REPLICATION_DETAILS},orphan_slots_${ORPHANS}"
   fi
 else
-  echo "ERROR: PostgreSQL container not running"
+  echo "ERROR: ciris-billing-spock container not running"
   REPLICATION_OK=false
-  REPLICATION_DETAILS="postgres_down"
+  REPLICATION_DETAILS="spock_down"
 fi
 
 if [ "$REPLICATION_OK" = false ]; then
-  log_to_lens "ERROR" "PostgreSQL replication issue" "replication_check_failed" "{\"details\": \"${REPLICATION_DETAILS}\"}"
+  log_to_lens "ERROR" "Spock replication issue" "replication_check_failed" "{\"details\": \"${REPLICATION_DETAILS}\"}"
 else
-  log_to_lens "INFO" "PostgreSQL replication healthy" "replication_check_passed" "{\"details\": \"${REPLICATION_DETAILS}\", \"lag_mb\": ${LAG_MB:-0}}"
+  log_to_lens "INFO" "Spock replication healthy" "replication_check_passed" "{\"details\": \"${REPLICATION_DETAILS}\", \"lag_mb\": ${LAG_MB}}"
 fi
 
 # ============================================================================

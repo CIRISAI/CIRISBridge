@@ -27,7 +27,17 @@
         - /opt/ciris/lens/config/grafana/provisioning/alerting
         - /opt/ciris/lens/dashboards
         - /opt/ciris/lens/sql
+
+    - name: Create CIRISLens log + keyring directories (writable by container uid 1000)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+        owner: "1000"
+        group: "1000"
+      loop:
         - /var/log/ciris/lens
+        - /data/cirislens/keyring
 
     - name: Create CIRISLens data directories
       ansible.builtin.file:
@@ -40,6 +50,16 @@
         - /data/cirislens
         - /data/cirislens/postgres
         - /data/cirislens/grafana
+
+    - name: Stage lens-steward Ed25519 seed (mounted RO into lens-api at /app/keys/lens-steward.seed)
+      ansible.builtin.copy:
+        content: "{{ lens_steward_ed25519_secret | b64decode }}"
+        dest: /opt/ciris/lens/keys/lens-steward.seed
+        mode: "0600"
+        owner: "1000"
+        group: "1000"
+      no_log: true
+      notify: Restart CIRISLens
 
     - name: Copy CIRISLens docker-compose
       ansible.builtin.template:

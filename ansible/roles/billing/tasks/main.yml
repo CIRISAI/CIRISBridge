@@ -75,6 +75,42 @@
   register: migration_result
 
 # =============================================================================
+# RECONCILE SPOCK REPLICATION SET: ensure every public table is in 'default'.
+# Why this exists: alembic migrations create tables via raw DDL, but Spock 5.x
+# does not auto-add new tables to a replication set. Without this, DML on a
+# new table only persists locally and never propagates to the peer node — see
+# 2026-05-01 incident with admin_oauth_sessions/stripe_payment_intents.
+# Idempotent: repset_add_table is a no-op when the table is already in the set.
+# =============================================================================
+- name: "RECONCILE: add any public tables missing from Spock 'default' repset"
+  ansible.builtin.shell: |
+    docker exec -i -e PGPASSWORD='{{ billing_db_password }}' ciris-billing-spock \
+      /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing -tAc "
+    DO \$reconcile\$
+    DECLARE r record;
+    BEGIN
+      FOR r IN
+        SELECT t.tablename
+        FROM pg_tables t
+        LEFT JOIN spock.tables s
+          ON s.nspname = t.schemaname
+         AND s.relname  = t.tablename
+         AND s.set_name = 'default'
+        WHERE t.schemaname = 'public'
+          AND s.relname IS NULL
+      LOOP
+        PERFORM spock.repset_add_table('default','public.'||quote_ident(r.tablename), true);
+        RAISE NOTICE 'spock_repset: added public.% to default', r.tablename;
+      END LOOP;
+    END\$reconcile\$;"
+  register: spock_reconcile
+  changed_when: "'spock_repset: added' in spock_reconcile.stderr"
+
+- name: "RECONCILE: report any tables added"
+  ansible.builtin.debug:
+    msg: "Spock repset reconciliation: {{ (spock_reconcile.stderr_lines | select('search','spock_repset:') | list) or ['no new tables to add'] }}"
+
+# =============================================================================
 # SMOKE TEST: Verify critical flows work
 # TODO: Implement after Google OAuth test account is set up
 # =============================================================================

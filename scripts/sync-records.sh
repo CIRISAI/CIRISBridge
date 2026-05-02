@@ -1,4 +1,12 @@
 #!/bin/bash
+# DECOMMISSIONED 2026-05-02: Constellation DNS has been retired; this script
+# pushed zones.yaml entries into Constellation's Redis. With Constellation
+# stopped on both nodes, running this script is a no-op (Redis target is gone).
+# Preserved on disk for reversibility / Reticulum migration reference.
+echo "DECOMMISSIONED: scripts/sync-records.sh — Constellation DNS retired 2026-05-02 (Reticulum migration)." >&2
+exit 0
+
+# Original script preserved below.
 # Sync DNS records to Constellation instances
 # Reads zones.yaml and pushes to both DNS servers
 

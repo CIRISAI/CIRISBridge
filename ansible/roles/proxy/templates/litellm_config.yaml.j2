@@ -103,18 +103,58 @@ model_list:
       model: "together_ai/Qwen/Qwen2.5-72B-Instruct-Turbo"
       api_key: "os.environ/TOGETHER_API_KEY"
 
-  # Qwen 3.5-35B-A3B - MoE model, 35B total / 3B active params
-  # 262K context, fast inference due to small active params
-  # Pricing: $0.163/$0.90 per 1M tokens (OpenRouter)
+  # Qwen 3.6-35B-A3B - PRIMARY model for CIRIS Agent (2026-04-27)
+  # MoE: 35B total / 3B active params, 262K context
+  # Deepinfra primary, OpenRouter backup, Groq llama-4-scout cross-model failover
+  # extra_body.chat_template_kwargs.enable_thinking=false: disables Qwen3 reasoning chains by default
+  - model_name: "qwen-3.6-35b"
+    litellm_params:
+      model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
+      api_key: "os.environ/DEEPINFRA_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - model_name: "deepinfra/qwen-3.6-35b"
+    litellm_params:
+      model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
+      api_key: "os.environ/DEEPINFRA_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - model_name: "openrouter/qwen-3.6-35b"
+    litellm_params:
+      model: "openrouter/qwen/qwen3.6-35b-a3b"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  # Qwen 3.5-35B-A3B - kept for backwards compatibility
   - model_name: "qwen-3.5-35b"
     litellm_params:
       model: "openrouter/qwen/qwen3.5-35b-a3b"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
 
   - model_name: "openrouter/qwen-3.5-35b"
     litellm_params:
       model: "openrouter/qwen/qwen3.5-35b-a3b"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - model_name: "deepinfra/qwen-3.5-35b"
+    litellm_params:
+      model: "deepinfra/Qwen/Qwen3.5-35B-A3B"
+      api_key: "os.environ/DEEPINFRA_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
 
   # OpenAI (optional fallback)
   - model_name: "openai/gpt-4o-mini"
@@ -128,12 +168,16 @@ model_list:
       api_key: "os.environ/OPENAI_API_KEY"
 
   # Aliases for simpler client usage
-  # Default model for CIRIS Agent - Llama 4 Scout via Groq (fastest, most reliable)
+  # Default model for CIRIS Agent - Qwen 3.6-35B-A3B via Deepinfra (2026-04-27)
   - model_name: "default"
     litellm_params:
-      model: "groq/meta-llama/llama-4-scout-17b-16e-instruct"
-      api_key: "os.environ/GROQ_API_KEY"
+      model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
+      api_key: "os.environ/DEEPINFRA_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
 
+  # Fast alias - Groq Llama 4 Scout (high-speed cross-model failover)
   - model_name: "fast"
     litellm_params:
       model: "groq/meta-llama/llama-4-scout-17b-16e-instruct"
@@ -168,9 +212,16 @@ router_settings:
   num_retries: 2
   retry_after: 1
 
-  # Fallback chain - Llama 4 Scout: Groq primary, OpenRouter backup, Together tertiary
+  # Fallback chain
+  # Primary: Qwen 3.6-35B-A3B - Deepinfra → OpenRouter → Groq llama-4-scout (cross-model)
+  # Scout (fast/legacy): Groq → OpenRouter → Together
   fallbacks:
-    - "default": ["openrouter/llama-4-scout", "together/llama-4-scout"]
+    - "default": ["openrouter/qwen-3.6-35b", "groq/llama-4-scout"]
+    - "qwen-3.6-35b": ["openrouter/qwen-3.6-35b", "groq/llama-4-scout"]
+    - "deepinfra/qwen-3.6-35b": ["openrouter/qwen-3.6-35b", "groq/llama-4-scout"]
+    - "openrouter/qwen-3.6-35b": ["deepinfra/qwen-3.6-35b", "groq/llama-4-scout"]
+    # Llama 4 Scout - retained as high-speed cross-model failover and legacy alias
+    - "fast": ["openrouter/llama-4-scout", "together/llama-4-scout"]
     - "llama-4-scout": ["openrouter/llama-4-scout", "together/llama-4-scout"]
     - "groq/llama-4-scout": ["openrouter/llama-4-scout", "together/llama-4-scout"]
     - "openrouter/llama-4-scout": ["groq/llama-4-scout", "together/llama-4-scout"]

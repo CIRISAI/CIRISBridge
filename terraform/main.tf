@@ -94,25 +94,31 @@ resource "vultr_firewall_rule" "ssh" {
   notes             = "SSH from admin"
 }
 
-resource "vultr_firewall_rule" "dns_udp" {
-  firewall_group_id = vultr_firewall_group.cirisbridge.id
-  protocol          = "udp"
-  ip_type           = "v4"
-  subnet            = "0.0.0.0"
-  subnet_size       = 0
-  port              = "53"
-  notes             = "DNS UDP"
-}
-
-resource "vultr_firewall_rule" "dns_tcp" {
-  firewall_group_id = vultr_firewall_group.cirisbridge.id
-  protocol          = "tcp"
-  ip_type           = "v4"
-  subnet            = "0.0.0.0"
-  subnet_size       = 0
-  port              = "53"
-  notes             = "DNS TCP"
-}
+# DECOMMISSIONED 2026-05-02: ports 53/udp and 53/tcp were open on the Vultr
+# firewall for Constellation DNS, which has been retired (Reticulum migration).
+# Commented rather than deleted so a `terraform apply` doesn't silently remove
+# the live FW rules. To remove the live rules: `terraform state rm
+# vultr_firewall_rule.dns_udp vultr_firewall_rule.dns_tcp` and delete via Vultr
+# UI, or briefly un-comment, `terraform apply`, then re-delete this block.
+# resource "vultr_firewall_rule" "dns_udp" {
+#   firewall_group_id = vultr_firewall_group.cirisbridge.id
+#   protocol          = "udp"
+#   ip_type           = "v4"
+#   subnet            = "0.0.0.0"
+#   subnet_size       = 0
+#   port              = "53"
+#   notes             = "DNS UDP"
+# }
+#
+# resource "vultr_firewall_rule" "dns_tcp" {
+#   firewall_group_id = vultr_firewall_group.cirisbridge.id
+#   protocol          = "tcp"
+#   ip_type           = "v4"
+#   subnet            = "0.0.0.0"
+#   subnet_size       = 0
+#   port              = "53"
+#   notes             = "DNS TCP"
+# }
 
 resource "vultr_firewall_rule" "https" {
   firewall_group_id = vultr_firewall_group.cirisbridge.id

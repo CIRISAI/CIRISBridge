@@ -49,7 +49,11 @@ logs/
 
 # Backup files
 *.bak
+*.bak.*
 *.backup
+
+# Encrypted-secret master keys (load-bearing — never commit)
+ansible/.ciris_keys/
 
 # Test artifacts
 .pytest_cache/

@@ -1,27 +1,43 @@
-# Deploy DNS (Constellation) only
+# DECOMMISSIONED 2026-05-02: Constellation DNS replaced by Reticulum migration.
+# Containers stopped on both nodes; data volumes retained at /opt/ciris/dns/.
+# Zero traffic to cirisdns at decom time — all CIRIS domains delegate to
+# Cloudflare/Hetzner. Role remains on disk under roles/constellation/ for
+# reversibility; remove the role + this file after Reticulum is load-bearing.
 #
-# Usage:
-#   ansible-playbook playbooks/dns.yml
+# Original playbook content preserved below for reference.
 
 ---
-- name: Deploy Constellation DNS
-  hosts: all
-  become: true
+# - name: Deploy Constellation DNS
+#   hosts: all
+#   become: true
+#
+#   roles:
+#     - common
+#     - constellation
+#
+#   post_tasks:
+#     - name: Verify DNS is running
+#       ansible.builtin.uri:
+#         url: "http://localhost:8080/health"
+#         status_code: 200
+#       register: dns_health
+#       retries: 5
+#       delay: 3
+#       until: dns_health.status == 200
+#
+#     - name: Display DNS status
+#       ansible.builtin.debug:
+#         msg: "DNS healthy on {{ inventory_hostname }}"
 
-  roles:
-    - common
-    - constellation
-
-  post_tasks:
-    - name: Verify DNS is running
-      ansible.builtin.uri:
-        url: "http://localhost:8080/health"
-        status_code: 200
-      register: dns_health
-      retries: 5
-      delay: 3
-      until: dns_health.status == 200
-
-    - name: Display DNS status
+- name: DECOMMISSIONED — Constellation DNS removed 2026-05-02
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Notice
       ansible.builtin.debug:
-        msg: "DNS healthy on {{ inventory_hostname }}"
+        msg: >
+          playbooks/dns.yml is decommissioned. Constellation DNS was retired
+          on 2026-05-02 (Reticulum migration). See ansible/roles/constellation/
+          for the preserved role definition; UFW 53 rules in roles/common/
+          have also been disabled.
