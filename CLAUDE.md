@@ -468,7 +468,7 @@ Operational runbooks for incident response and infrastructure management are in 
 | Runbook | Purpose |
 |---------|---------|
 | `billing-rollback.yml` | Rollback billing to previous version |
-| `billing-ops.yml` | Billing database queries (user lookup, usage, transactions) |
+| `billing-ops.yml` | Billing database queries — `--tags status` is the canonical 24h ops report (new accounts by oauth_provider, LLM telemetry, model histogram, hourly distribution, top users, 7-day activity, container health). Also: lookup, usage, tools, transactions, stats. Connects to ciris-billing-spock:5433. |
 | `legacy-migration.yml` | Migrate from legacy servers to CIRISBridge |
 | `scout-ops.yml` | Scout agent database queries (stuck thoughts, stats) |
 | `cert-rotate.yml` | Rotate SSL certs for multi-instance deployments |
@@ -539,10 +539,13 @@ ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stats
 ansible-playbook -i inventory/production.yml runbooks/scout-ops.yml --tags stats-by-occurrence      # Stats by agent occurrence
 
 # Billing Operations
-ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags status                 # Quick 24h status
-ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup -e "external_id=123"  # User lookup
-ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags usage -e "external_id=123"   # User usage history
-ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags transactions -e "limit=20"   # Recent transactions
+# --limit us recommended — Spock is multi-master, US/EU return identical data within sub-second lag
+ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags status --limit us         # 24h ops report
+ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup -e "external_id=123" --limit us  # User lookup
+ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags usage -e "external_id=123" --limit us   # User usage history
+ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags tools -e "external_id=123" --limit us   # User tool credits
+ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags transactions -e "limit=20" --limit us   # Recent transactions
+ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags stats --limit us          # Full system stats (accounts, 7d LLM, tools)
 
 # Test Environment (requires: export CLOUDFLARE_API_TOKEN=xxx)
 ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up         # Spin up (~$42/mo)

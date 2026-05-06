@@ -144,6 +144,13 @@ services:
       # ahead of this rollout, so the FK target row exists in cirislens.federation_keys.
       # STEWARD_KEY_ID defaults to "lens-steward" — only the path is required.
       CIRISLENS_STEWARD_KEY_PATH: /app/keys/lens-steward.seed
+      # Federation steward PQC identity — ML-DSA-65 seed for the cold-path
+      # PQC sign (persist 0.3.1+). Persist's cold-path worker calls
+      # attach_key_pqc_signature() on hybrid-pending rows after Ed25519
+      # write, completing the (canonical || classical_sig) hybrid binding.
+      # Backfilled rows from the migrator + new agent registrations both
+      # depend on this to reach pqc_completed_at != NULL state.
+      CIRISLENS_STEWARD_PQC_KEY_PATH: /app/keys/lens-steward.mldsa.secret
       # Scrubber v2 divergence log (persisted to host via /var/log/ciris/lens mount)
       CIRISLENS_SCRUBBER_DIVERGENCE_LOG: /app/logs/scrubber_divergence.jsonl
       # Persistent keyring for SoftwareSigner — guarantees stable lens identity across restarts

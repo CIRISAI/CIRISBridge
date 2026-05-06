@@ -1,179 +1,270 @@
 ---
 # Billing Operations Runbook
-# Common database queries for billing troubleshooting
-# Reference: https://docs.ansible.com/ansible/2.8/user_guide/playbooks_best_practices.html
+# Common database queries for billing troubleshooting + 24h status reports
+#
+# Connects to ciris-billing-spock (port 5433, billing user, pgEdge Spock multi-master).
+# The legacy ciris-postgres (port 5432, postgres user) was decommissioned 2026-05-02
+# in the Spock cutover.
 #
 # Usage:
-#   # Quick status check (24h stats, new users)
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags status --vault-password-file ~/.vault_pass
+#   # Quick status — full 24h report (new users, LLM telemetry, models, hourly, top users)
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags status \
+#     --vault-password-file ~/.vault_pass --limit us
 #
-#   # Look up user by external ID (Google ID)
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup -e "external_id=10942" --vault-password-file ~/.vault_pass
+#   # User lookup
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup \
+#     -e "external_id=10942" --vault-password-file ~/.vault_pass --limit us
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup \
+#     -e "email=user@example.com" --vault-password-file ~/.vault_pass --limit us
 #
-#   # Look up user by email
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags lookup -e "email=user@example.com" --vault-password-file ~/.vault_pass
+#   # User usage history
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags usage \
+#     -e "external_id=10942" --vault-password-file ~/.vault_pass --limit us
 #
-#   # Get user's usage history
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags usage -e "external_id=10942" --vault-password-file ~/.vault_pass
+#   # User tool credits
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags tools \
+#     -e "external_id=10942" --vault-password-file ~/.vault_pass --limit us
 #
-#   # Get user's tool credits
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags tools -e "external_id=10942" --vault-password-file ~/.vault_pass
+#   # Recent transactions
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags transactions \
+#     -e "limit=20" --vault-password-file ~/.vault_pass --limit us
 #
-#   # List recent transactions
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags transactions -e "limit=20" --vault-password-file ~/.vault_pass
+#   # Full system stats (accounts, 7d LLM, tool usage)
+#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags stats \
+#     --vault-password-file ~/.vault_pass --limit us
 #
-#   # Get system stats (full)
-#   ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags stats --vault-password-file ~/.vault_pass
+# Note: --limit us is recommended since Spock is multi-master and US/EU return
+# identical data within sub-second replication lag. Querying both nodes just
+# doubles the output.
 
-- name: "BILLING OPS - Quick Status"
+- name: "BILLING OPS - Quick Status (24h report)"
   hosts: all
   gather_facts: false
   tags: [status]
+  vars:
+    psql: "docker exec -e PGPASSWORD={{ billing_db_password }} ciris-billing-spock /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing"
 
   tasks:
-    - name: "STATUS: Get 24h charge activity"
+    - name: "STATUS: New accounts (24h, by oauth_provider)"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            COUNT(*) as charges_24h,
-            COUNT(DISTINCT account_id) as unique_users_24h,
-            COALESCE(SUM(amount_minor), 0) as total_amount_minor
+            COUNT(*) AS new_accounts_24h,
+            COUNT(*) FILTER (WHERE oauth_provider = 'oauth:google') AS via_google,
+            COUNT(*) FILTER (WHERE oauth_provider = 'oauth:apple')  AS via_apple,
+            COUNT(*) FILTER (WHERE oauth_provider LIKE 'oauth:test%') AS via_test
+          FROM accounts
+          WHERE created_at > NOW() - INTERVAL '24 hours';
+        "
+      register: new_accounts
+      changed_when: false
+      ignore_errors: true
+
+    - name: "STATUS: LLM usage telemetry (24h)"
+      ansible.builtin.shell: |
+        {{ psql }} -c "
+          SELECT
+            COUNT(*) AS interactions,
+            COUNT(DISTINCT account_id) AS active_users,
+            SUM(total_llm_calls) AS llm_calls,
+            SUM(total_prompt_tokens) AS prompt_tokens,
+            SUM(total_completion_tokens) AS completion_tokens,
+            SUM(error_count) AS errors,
+            SUM(fallback_count) AS fallbacks
+          FROM llm_usage_logs
+          WHERE created_at > NOW() - INTERVAL '24 hours';
+        "
+      register: llm_telemetry
+      changed_when: false
+      ignore_errors: true
+
+    - name: "STATUS: Charges (24h)"
+      ansible.builtin.shell: |
+        {{ psql }} -c "
+          SELECT
+            COUNT(*) AS charge_count,
+            COUNT(DISTINCT account_id) AS unique_users,
+            ROUND(SUM(amount_minor)::numeric / 100, 2) AS total_usd
           FROM charges
           WHERE created_at > NOW() - INTERVAL '24 hours';
         "
-      register: charges_24h
-      ignore_errors: yes
+      register: charges
+      changed_when: false
+      ignore_errors: true
 
-    - name: "STATUS: Get 7-day daily activity"
+    - name: "STATUS: Model usage histogram (24h)"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            DATE(created_at) as day,
-            COUNT(*) as charges,
-            COUNT(DISTINCT account_id) as users
+            unnest(models_used) AS model,
+            COUNT(*) AS interactions
+          FROM llm_usage_logs
+          WHERE created_at > NOW() - INTERVAL '24 hours'
+          GROUP BY model
+          ORDER BY interactions DESC;
+        "
+      register: model_histogram
+      changed_when: false
+      ignore_errors: true
+
+    - name: "STATUS: Hourly distribution (24h, UTC)"
+      ansible.builtin.shell: |
+        {{ psql }} -c "
+          SELECT
+            date_trunc('hour', created_at) AS hour_utc,
+            COUNT(*) AS interactions,
+            SUM(total_llm_calls) AS llm_calls,
+            COUNT(DISTINCT account_id) AS users
+          FROM llm_usage_logs
+          WHERE created_at > NOW() - INTERVAL '24 hours'
+          GROUP BY 1 ORDER BY 1;
+        "
+      register: hourly
+      changed_when: false
+      ignore_errors: true
+
+    - name: "STATUS: Top users (24h, by interaction count)"
+      ansible.builtin.shell: |
+        {{ psql }} -c "
+          SELECT
+            substring(account_id::text, 1, 8) AS account_prefix,
+            COUNT(*) AS interactions,
+            SUM(total_llm_calls) AS llm_calls,
+            SUM(total_prompt_tokens) AS prompt_tokens,
+            ROUND(AVG(duration_ms)::numeric, 0) AS avg_ms
+          FROM llm_usage_logs
+          WHERE created_at > NOW() - INTERVAL '24 hours'
+          GROUP BY account_id
+          ORDER BY interactions DESC
+          LIMIT 10;
+        "
+      register: top_users
+      changed_when: false
+      ignore_errors: true
+
+    - name: "STATUS: 7-day daily activity"
+      ansible.builtin.shell: |
+        {{ psql }} -c "
+          SELECT
+            DATE(created_at) AS day,
+            COUNT(*) AS charges,
+            COUNT(DISTINCT account_id) AS users,
+            ROUND(SUM(amount_minor)::numeric / 100, 2) AS total_usd
           FROM charges
           WHERE created_at > NOW() - INTERVAL '7 days'
           GROUP BY DATE(created_at)
           ORDER BY day DESC;
         "
-      register: daily_activity
-      ignore_errors: yes
+      register: daily_7d
+      changed_when: false
+      ignore_errors: true
 
-    - name: "STATUS: Get new users (last 24h)"
+    - name: "STATUS: Account totals (lifetime)"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            external_id,
-            customer_email,
-            display_name,
-            created_at
-          FROM accounts
-          WHERE created_at > NOW() - INTERVAL '24 hours'
-          ORDER BY created_at DESC;
-        "
-      register: new_users
-      ignore_errors: yes
-
-    - name: "STATUS: Get account totals"
-      ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
-          SELECT
-            COUNT(*) as total_accounts,
-            COUNT(*) FILTER (WHERE status = 'active') as active_accounts,
-            COUNT(*) FILTER (WHERE total_uses > 0) as accounts_with_usage
+            COUNT(*) AS total_accounts,
+            COUNT(*) FILTER (WHERE status = 'active') AS active_accounts,
+            COUNT(*) FILTER (WHERE total_uses > 0) AS accounts_with_usage
           FROM accounts;
         "
       register: account_totals
-      ignore_errors: yes
+      changed_when: false
+      ignore_errors: true
 
-    - name: "STATUS: Get container health"
+    - name: "STATUS: Container health"
       ansible.builtin.shell: |
         docker ps --format '{{ '{{' }}.Names{{ '}}' }}: {{ '{{' }}.Status{{ '}}' }}' | sort
       register: container_health
-      ignore_errors: yes
+      changed_when: false
+      ignore_errors: true
 
-    - name: "STATUS: Get system resources"
+    - name: "STATUS: System resources"
       ansible.builtin.shell: |
         echo "Load: $(uptime | awk -F'load average:' '{print $2}')"
         echo "Memory: $(free -m | awk '/^Mem:/ {printf "%dM / %dM (%d%%)", $3, $2, int($3/$2*100)}')"
         echo "Disk: $(df -h / | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')"
       register: system_resources
-      ignore_errors: yes
+      changed_when: false
+      ignore_errors: true
 
-    - name: "STATUS: Display results"
+    - name: "STATUS: Display report"
       ansible.builtin.debug:
         msg: |
-          === {{ inventory_hostname | upper }} - SYSTEM RESOURCES ===
-          {{ system_resources.stdout | default('No resource data') }}
+          ================================================================
+          {{ inventory_hostname | upper }} — BILLING/PROXY 24h REPORT
+          ================================================================
 
-          === CONTAINER HEALTH ===
-          {{ container_health.stdout | default('No container data') }}
+          === System resources ===
+          {{ system_resources.stdout | default('(unavailable)') }}
 
-          === 24h Charge Activity ===
-          {{ charges_24h.stdout | default('No charge data') }}
+          === Container health ===
+          {{ container_health.stdout | default('(unavailable)') }}
 
-          === 7-Day Activity ===
-          {{ daily_activity.stdout | default('No daily data') }}
+          === New accounts (24h) ===
+          {{ new_accounts.stdout | default('(unavailable)') }}
 
-          === New Users (24h) ===
-          {{ new_users.stdout | default('No new users') }}
+          === LLM usage telemetry (24h) ===
+          {{ llm_telemetry.stdout | default('(unavailable)') }}
 
-          === Account Totals ===
-          {{ account_totals.stdout | default('No account data') }}
+          === Charges (24h) ===
+          {{ charges.stdout | default('(unavailable)') }}
+
+          === Model usage (24h) ===
+          {{ model_histogram.stdout | default('(unavailable)') }}
+
+          === Hourly distribution (24h, UTC) ===
+          {{ hourly.stdout | default('(unavailable)') }}
+
+          === Top users (24h) ===
+          {{ top_users.stdout | default('(unavailable)') }}
+
+          === 7-day daily activity ===
+          {{ daily_7d.stdout | default('(unavailable)') }}
+
+          === Account totals (lifetime) ===
+          {{ account_totals.stdout | default('(unavailable)') }}
 
 - name: "BILLING OPS - User Lookup"
   hosts: vultr
   gather_facts: false
-  tags: [lookup]
+  tags: [lookup, never]
   vars:
     external_id: ""
     email: ""
+    psql: "docker exec -e PGPASSWORD={{ billing_db_password }} ciris-billing-spock /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing"
 
   tasks:
     - name: "LOOKUP: Find user by external_id"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            id,
-            external_id,
-            customer_email,
-            display_name,
-            balance_minor,
-            free_uses_remaining,
-            paid_credits,
-            daily_free_uses_remaining,
-            total_uses,
-            status,
-            created_at
+            id, external_id, customer_email, display_name,
+            balance_minor, free_uses_remaining, paid_credits,
+            daily_free_uses_remaining, total_uses, status, created_at
           FROM accounts
           WHERE external_id LIKE '{{ external_id }}%'
           ORDER BY created_at DESC
           LIMIT 10;
         "
       register: user_result
+      changed_when: false
       when: external_id | length > 0
 
     - name: "LOOKUP: Find user by email"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            id,
-            external_id,
-            customer_email,
-            display_name,
-            balance_minor,
-            free_uses_remaining,
-            paid_credits,
-            daily_free_uses_remaining,
-            total_uses,
-            status,
-            created_at
+            id, external_id, customer_email, display_name,
+            balance_minor, free_uses_remaining, paid_credits,
+            daily_free_uses_remaining, total_uses, status, created_at
           FROM accounts
           WHERE customer_email ILIKE '%{{ email }}%'
           ORDER BY created_at DESC
           LIMIT 10;
         "
       register: email_result
+      changed_when: false
       when: email | length > 0
 
     - name: "LOOKUP: Display results"
@@ -187,6 +278,7 @@
   vars:
     external_id: ""
     limit: 20
+    psql: "docker exec -e PGPASSWORD={{ billing_db_password }} ciris-billing-spock /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing"
 
   tasks:
     - name: Validate external_id
@@ -196,15 +288,12 @@
 
     - name: "USAGE: Get LLM usage logs"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            l.id,
-            l.models_used,
-            l.total_prompt_tokens as input_tokens,
-            l.total_completion_tokens as output_tokens,
-            l.actual_cost_cents,
-            l.duration_ms,
-            l.created_at
+            l.id, l.models_used,
+            l.total_prompt_tokens AS input_tokens,
+            l.total_completion_tokens AS output_tokens,
+            l.actual_cost_cents, l.duration_ms, l.created_at
           FROM llm_usage_logs l
           JOIN accounts a ON l.account_id = a.id
           WHERE a.external_id LIKE '{{ external_id }}%'
@@ -212,6 +301,7 @@
           LIMIT {{ limit }};
         "
       register: usage_result
+      changed_when: false
 
     - name: "USAGE: Display results"
       ansible.builtin.debug:
@@ -223,6 +313,7 @@
   tags: [tools, never]
   vars:
     external_id: ""
+    psql: "docker exec -e PGPASSWORD={{ billing_db_password }} ciris-billing-spock /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing"
 
   tasks:
     - name: Validate external_id
@@ -232,29 +323,23 @@
 
     - name: "TOOLS: Get product inventory"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            p.product_type,
-            p.free_remaining,
-            p.paid_credits,
-            p.total_uses,
-            p.last_daily_refresh,
-            p.created_at
+            p.product_type, p.free_remaining, p.paid_credits,
+            p.total_uses, p.last_daily_refresh, p.created_at
           FROM product_inventory p
           JOIN accounts a ON p.account_id = a.id
           WHERE a.external_id LIKE '{{ external_id }}%';
         "
       register: inventory_result
+      changed_when: false
 
     - name: "TOOLS: Get recent tool usage"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            l.product_type,
-            l.used_free,
-            l.used_paid,
-            l.cost_minor,
-            l.created_at
+            l.product_type, l.used_free, l.used_paid,
+            l.cost_minor, l.created_at
           FROM product_usage_logs l
           JOIN accounts a ON l.account_id = a.id
           WHERE a.external_id LIKE '{{ external_id }}%'
@@ -262,6 +347,7 @@
           LIMIT 20;
         "
       register: tool_usage_result
+      changed_when: false
 
     - name: "TOOLS: Display results"
       ansible.builtin.debug:
@@ -278,98 +364,102 @@
   tags: [transactions, never]
   vars:
     limit: 20
+    psql: "docker exec -e PGPASSWORD={{ billing_db_password }} ciris-billing-spock /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing"
 
   tasks:
+    # Note: charges has no `status` column in the Spock-era schema. Removed from select.
     - name: "TRANSACTIONS: Get recent charges"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            c.id,
-            a.external_id,
-            a.customer_email,
-            c.amount_minor,
-            c.currency,
-            c.status,
-            c.created_at
+            c.id, a.external_id, a.customer_email,
+            c.amount_minor, c.currency, c.description, c.created_at
           FROM charges c
           JOIN accounts a ON c.account_id = a.id
           ORDER BY c.created_at DESC
           LIMIT {{ limit }};
         "
       register: charges_result
+      changed_when: false
 
     - name: "TRANSACTIONS: Display results"
       ansible.builtin.debug:
         msg: "{{ charges_result.stdout }}"
 
-- name: "BILLING OPS - System Stats"
+- name: "BILLING OPS - System Stats (full)"
   hosts: vultr
   gather_facts: false
   tags: [stats, never]
+  vars:
+    psql: "docker exec -e PGPASSWORD={{ billing_db_password }} ciris-billing-spock /opt/pgedge/pg15/bin/psql -p 5433 -U billing -d ciris_billing"
 
   tasks:
-    - name: "STATS: Get account statistics"
+    - name: "STATS: Account statistics (lifetime)"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            COUNT(*) as total_accounts,
-            COUNT(*) FILTER (WHERE status = 'active') as active_accounts,
-            COUNT(*) FILTER (WHERE total_uses > 0) as accounts_with_usage,
-            SUM(total_uses) as total_llm_uses,
-            SUM(balance_minor) as total_balance_minor,
-            SUM(paid_credits) as total_paid_credits
+            COUNT(*) AS total_accounts,
+            COUNT(*) FILTER (WHERE status = 'active') AS active_accounts,
+            COUNT(*) FILTER (WHERE total_uses > 0) AS accounts_with_usage,
+            SUM(total_uses) AS total_llm_uses,
+            SUM(balance_minor) AS total_balance_minor,
+            SUM(paid_credits) AS total_paid_credits
           FROM accounts;
         "
       register: account_stats
+      changed_when: false
 
-    - name: "STATS: Get usage statistics (last 24h)"
+    - name: "STATS: Charges (24h)"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            COUNT(*) as charges_24h,
-            COUNT(DISTINCT account_id) as unique_users_24h,
-            SUM(amount_minor) as total_amount_minor_24h
+            COUNT(*) AS charges_24h,
+            COUNT(DISTINCT account_id) AS unique_users_24h,
+            SUM(amount_minor) AS total_amount_minor_24h
           FROM charges
           WHERE created_at > NOW() - INTERVAL '24 hours';
         "
       register: usage_stats
+      changed_when: false
 
-    - name: "STATS: Get LLM usage statistics (last 7d)"
+    - name: "STATS: LLM usage (7d)"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
-            COUNT(*) as llm_requests_7d,
-            COUNT(DISTINCT account_id) as unique_users_7d,
-            SUM(total_prompt_tokens + total_completion_tokens) as total_tokens_7d,
-            SUM(actual_cost_cents) as total_cost_cents_7d
+            COUNT(*) AS llm_requests_7d,
+            COUNT(DISTINCT account_id) AS unique_users_7d,
+            SUM(total_prompt_tokens + total_completion_tokens) AS total_tokens_7d,
+            SUM(actual_cost_cents) AS total_cost_cents_7d
           FROM llm_usage_logs
           WHERE created_at > NOW() - INTERVAL '7 days';
         "
       register: llm_stats
+      changed_when: false
 
-    - name: "STATS: Get tool usage statistics"
+    - name: "STATS: Tool usage by product"
       ansible.builtin.shell: |
-        docker exec ciris-postgres psql -U postgres -d ciris_billing -c "
+        {{ psql }} -c "
           SELECT
             product_type,
-            COUNT(*) as total_uses,
-            COUNT(*) FILTER (WHERE used_free) as free_uses,
-            COUNT(*) FILTER (WHERE used_paid) as paid_uses
+            COUNT(*) AS total_uses,
+            COUNT(*) FILTER (WHERE used_free) AS free_uses,
+            COUNT(*) FILTER (WHERE used_paid) AS paid_uses
           FROM product_usage_logs
           GROUP BY product_type;
         "
       register: tool_stats
+      changed_when: false
 
     - name: "STATS: Display results"
       ansible.builtin.debug:
         msg: |
-          === Account Statistics ===
+          === Account Statistics (lifetime) ===
           {{ account_stats.stdout }}
 
-          === Charges (Last 24h) ===
+          === Charges (24h) ===
           {{ usage_stats.stdout }}
 
-          === LLM Usage (Last 7d) ===
+          === LLM Usage (7d) ===
           {{ llm_stats.stdout }}
 
           === Tool Usage by Product ===

@@ -61,6 +61,16 @@
       no_log: true
       notify: Restart CIRISLens
 
+    - name: Stage lens-steward ML-DSA-65 seed (cold-path PQC sign — persist 0.3.1+)
+      ansible.builtin.copy:
+        content: "{{ lens_steward_mldsa_secret | b64decode }}"
+        dest: /opt/ciris/lens/keys/lens-steward.mldsa.secret
+        mode: "0600"
+        owner: "1000"
+        group: "1000"
+      no_log: true
+      notify: Restart CIRISLens
+
     - name: Copy CIRISLens docker-compose
       ansible.builtin.template:
         src: docker-compose.yml.j2
