@@ -54,6 +54,10 @@
     log_lines_to_keep: 1000
     # Build cache age filter (hours)
     build_cache_age: 72
+    # Tagged image age filter (hours) — preserves last N hours of tagged
+    # images in case of rollback. Older tagged-but-unused images are pruned.
+    # The fleet deploys frequently (often hourly); 72h is a safe default.
+    image_prune_age: 72
     # Journal retention (days)
     journal_retention_days: 7
 
@@ -119,6 +123,19 @@
             docker image prune -f
           register: image_prune
           changed_when: "'Total reclaimed space' in image_prune.stdout"
+
+        # The fleet deploys to lens frequently (often multiple times per day),
+        # each leaving a ~1.8GB tagged image on disk. `image prune -f` (above)
+        # only removes dangling (untagged) images — tagged-but-unused ones
+        # survive forever and accumulate. This task removes unused TAGGED
+        # images older than image_prune_age hours (default 72h), preserving
+        # recent ones in case of rollback.
+        - name: "DOCKER-CLEAN: Remove unused tagged images older than {{ image_prune_age }}h"
+          ansible.builtin.shell: |
+            echo "Removing unused tagged images older than {{ image_prune_age }} hours..."
+            docker image prune -af --filter until={{ image_prune_age }}h
+          register: image_prune_tagged
+          changed_when: "'Total reclaimed space' in image_prune_tagged.stdout"
 
         - name: "DOCKER-CLEAN: Remove unused networks"
           ansible.builtin.shell: |
@@ -237,6 +254,9 @@
             echo ""
             echo "Removing dangling images..."
             docker image prune -f
+            echo ""
+            echo "Removing unused tagged images older than {{ image_prune_age }}h..."
+            docker image prune -af --filter until={{ image_prune_age }}h
             echo ""
             echo "Removing unused networks..."
             docker network prune -f

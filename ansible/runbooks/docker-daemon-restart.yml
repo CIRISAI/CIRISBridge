@@ -1,0 +1,141 @@
+---
+# Docker Daemon Restart Runbook
+# Activates pending /etc/docker/daemon.json changes that take effect at
+# daemon start (not container restart). One specific reason to run this:
+# the explicit DNS prophylaxis added to daemon.json on 2026-05-10 won't
+# activate on running containers until the daemon itself restarts.
+#
+# Behavior:
+#   - All containers stop and restart together (~30-60s of downtime per host)
+#   - Container resolv.conf is regenerated from daemon settings (not host
+#     /etc/resolv.conf). After this, containers get explicit 1.1.1.1, 8.8.8.8
+#     DNS regardless of host resolver state — robust against the
+#     systemd-resolved-disabled trap that bit us on the 2026-05-09 EU reboot.
+#
+# Usage:
+#   # Verify daemon.json is present on the target node first
+#   ansible-playbook -i inventory/production.yml runbooks/docker-daemon-restart.yml \
+#     --tags verify --limit eu
+#
+#   # Actually restart the daemon (real downtime)
+#   ansible-playbook -i inventory/production.yml runbooks/docker-daemon-restart.yml \
+#     --tags restart --limit eu
+#
+# Coordination notes:
+#   - Bridge is active/active; restarting one node moves traffic to the other.
+#     Run EU first (no lens dependency), then US (lens is US-only, ~30s
+#     lens-api unavailability during US restart).
+#   - Vault containers SEAL on restart. After US daemon restart, CIRISCore
+#     must run vault-unseal.yml against US. Same EU/US handshake as the
+#     CVE-2026-31431 reboot cycle (see /tmp/cve-reboot/README pattern).
+#   - Capture pre/post surface snapshots via scripts/surface-scan.py to
+#     catch any container that doesn't come back cleanly.
+
+- name: "DOCKER DAEMON RESTART — verify + restart"
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    # ── Verify ──────────────────────────────────────────────────────
+    - name: "VERIFY: daemon.json present + correctly configured"
+      tags: [verify, restart]
+      ansible.builtin.shell: |
+        if [ ! -f /etc/docker/daemon.json ]; then
+          echo "MISSING: /etc/docker/daemon.json"
+          exit 1
+        fi
+        echo "current /etc/docker/daemon.json:"
+        cat /etc/docker/daemon.json
+        echo
+        echo "current docker dns settings (effective in running daemon):"
+        docker info 2>/dev/null | grep -iE "DNS|Server Version" || echo "  (docker info unavailable)"
+        echo
+        echo "current container DNS (sample container's /etc/resolv.conf):"
+        FIRST_C=$(docker ps --format '{{ '{{' }}.Names{{ '}}' }}' | head -1)
+        if [ -n "$FIRST_C" ]; then
+          docker exec "$FIRST_C" cat /etc/resolv.conf 2>&1 | head -5 || true
+        fi
+      register: verify_out
+      changed_when: false
+
+    - name: "VERIFY: display"
+      tags: [verify, restart]
+      ansible.builtin.debug:
+        msg: "{{ verify_out.stdout_lines }}"
+
+    # ── Stop here in verify-only mode ────────────────────────────────
+    - name: "Stop after verify"
+      tags: [never, verify]
+      ansible.builtin.meta: end_play
+
+    # ── Actually restart ─────────────────────────────────────────────
+    - name: "RESTART: capture pre-restart container list"
+      tags: [restart]
+      ansible.builtin.shell: |
+        docker ps --format '{{ '{{' }}.Names{{ '}}' }}:{{ '{{' }}.Status{{ '}}' }}' | sort
+      register: pre_containers
+      changed_when: false
+
+    - name: "RESTART: pre-restart container list"
+      tags: [restart]
+      ansible.builtin.debug:
+        msg: "{{ pre_containers.stdout_lines }}"
+
+    - name: "RESTART: systemctl restart docker (≈30-60s downtime per host)"
+      tags: [restart]
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+
+    - name: "RESTART: wait for docker daemon to be responsive"
+      tags: [restart]
+      ansible.builtin.shell: |
+        for i in $(seq 1 30); do
+          if docker info >/dev/null 2>&1; then
+            echo "daemon ready after ${i}s"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "daemon NOT ready after 30s"
+        exit 1
+      register: wait_daemon
+      changed_when: false
+
+    - name: "RESTART: post-restart container list (should match pre, all running)"
+      tags: [restart]
+      ansible.builtin.shell: |
+        sleep 15  # let healthchecks settle
+        docker ps --format '{{ '{{' }}.Names{{ '}}' }}:{{ '{{' }}.Status{{ '}}' }}' | sort
+      register: post_containers
+      changed_when: false
+
+    - name: "RESTART: post-restart container list"
+      tags: [restart]
+      ansible.builtin.debug:
+        msg: "{{ post_containers.stdout_lines }}"
+
+    - name: "RESTART: verify container DNS now from daemon.json"
+      tags: [restart]
+      ansible.builtin.shell: |
+        echo "container DNS after daemon restart (should now have 1.1.1.1, 8.8.8.8 if daemon.json applied):"
+        FIRST_C=$(docker ps --format '{{ '{{' }}.Names{{ '}}' }}' | head -1)
+        docker exec "$FIRST_C" cat /etc/resolv.conf 2>&1 | head -5 || true
+      register: post_dns
+      changed_when: false
+
+    - name: "RESTART: post-restart DNS check"
+      tags: [restart]
+      ansible.builtin.debug:
+        msg: "{{ post_dns.stdout_lines }}"
+
+    - name: "RESTART: reminder — vault unseal required if vault container was running"
+      tags: [restart]
+      ansible.builtin.debug:
+        msg: |
+          *** REMINDER ***
+          If ciris-vault is on this host, it has sealed on restart and needs
+          CIRISCore to run runbooks/vault-unseal.yml.
+          Append vault_{us,eu}_ssh_back to /tmp/cve-reboot/log.jsonl so
+          CIRISCore is notified to unseal.

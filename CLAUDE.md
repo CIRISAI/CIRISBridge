@@ -241,6 +241,8 @@ Service tokens must be created in the `cirislens.service_tokens` table for billi
 | `ansible/roles/*/templates/*.j2` | Service configuration templates |
 | `ansible/inventory/production.yml` | Production secrets and node config |
 | `ansible/inventory/test.yml` | Test environment inventory |
+| `scripts/surface-scan.py` | Bridge surface scanner — captures diff-able JSON snapshot of all production endpoints (probes + TLS + per-node internal state). Schema-compatible with CIRISCore's `surface.pre.json`. Usage: `python3 scripts/surface-scan.py --internal` for full snapshot, `--diff a.json b.json` to compare. Probe list in `scripts/surface.yml`. |
+| `scripts/lens_steward_bootstrap.py` | One-time federation_keys bootstrap (see `runbooks/lens-steward-bootstrap.yml`) |
 | `FSD.md` | Locked specification (do not modify) |
 
 ## Build/Deploy Commands
@@ -457,7 +459,9 @@ Operational runbooks for incident response and infrastructure management are in 
 |---------|---------|
 | `backup-verify.yml` | PostgreSQL backup and replication health |
 | `cert-status.yml` | TLS certificate expiration check |
-| `disk-cleanup.yml` | Docker/log cleanup with emergency mode |
+| `disk-cleanup.yml` | Docker/log cleanup with emergency mode. **Tags**: `status` (read-only), `docker-clean` (prune incl. tagged-images >72h), `logs-clean`, `full-clean`, `emergency`. Lens deploys every ~hour; without periodic `docker-clean` US disk climbs ~1.8 GB/deploy. |
+| `docker-daemon-restart.yml` | Restart Docker daemon to pick up `/etc/docker/daemon.json` changes (e.g. explicit DNS prophylaxis). Causes ~30-60s container downtime per host. Tags: `verify` (read-only state check), `restart`. Active/active means run EU first then US sequentially. Vault containers seal on restart — CIRISCore must run vault-unseal after. |
+| `surface-scan.py` *(scripts/)* | Bridge surface scanner — captures diff-able JSON snapshot. `--internal` adds SSH-side state. `--diff a.json b.json` to compare snapshots pre/post maintenance. |
 | `security-scan.yml` | SSH hardening, firewall, updates check |
 | `infra-status.yml` | Provider API status, bandwidth, anomaly detection |
 | `traffic-monitor.yml` | Network traffic analysis |
@@ -493,8 +497,11 @@ Operational runbooks for incident response and infrastructure management are in 
 ansible-playbook -i inventory/production.yml runbooks/cert-status.yml
 ansible-playbook -i inventory/production.yml runbooks/backup-verify.yml
 ansible-playbook -i inventory/production.yml runbooks/security-scan.yml
-ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags status
-ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags cleanup  # Actually clean
+ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags status        # Read-only status
+ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags docker-clean  # Prune unused images (incl. tagged >72h via image_prune_age)
+ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags logs-clean    # Truncate large container logs
+ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags full-clean    # All of the above
+ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags emergency     # Aggressive (docker system prune -a, etc.)
 
 # General Incident Response
 ansible-playbook -i inventory/production.yml runbooks/incident-response.yml -e "severity=P1"
