@@ -241,8 +241,12 @@ Service tokens must be created in the `cirislens.service_tokens` table for billi
 | `ansible/roles/*/templates/*.j2` | Service configuration templates |
 | `ansible/inventory/production.yml` | Production secrets and node config |
 | `ansible/inventory/test.yml` | Test environment inventory |
-| `scripts/surface-scan.py` | Bridge surface scanner — captures diff-able JSON snapshot of all production endpoints (probes + TLS + per-node internal state). Schema-compatible with CIRISCore's `surface.pre.json`. Usage: `python3 scripts/surface-scan.py --internal` for full snapshot, `--diff a.json b.json` to compare. Probe list in `scripts/surface.yml`. |
+| `scripts/surface-scan.py` | Bridge surface scanner — captures diff-able JSON snapshot. `--internal` adds SSH-side state. `--diff a.json b.json` for pre/post maintenance comparison. Probe list in `scripts/surface.yml`. |
+| `scripts/daily-status.sh` | Daily SRE sanity check — calls surface-scan + checks lens /health + heartbeats + error rates + PII inventory canary. Exit 0=green / 1=yellow / 2=red. Designed for cron or scheduled-agent fire. |
+| `scripts/weekly-status.sh` | Weekly SRE deep check — surface diff vs prior week + open issues across all CIRIS\* repos + cert expiry watch + disk trend. Emits markdown report. |
 | `scripts/lens_steward_bootstrap.py` | One-time federation_keys bootstrap (see `runbooks/lens-steward-bootstrap.yml`) |
+| `runbooks/BREACH_NOTIFICATION.md` | GDPR Art. 33 operational playbook — clock-start triggers, DPA directory, user-notification templates. Scaled to actual PII footprint per `PII_INVENTORY.md`. Closes CIRISBridge#2. |
+| `runbooks/PII_INVENTORY.md` | Living inventory of PII columns + counts. Updated when schema changes; cross-referenced by daily-status.sh PII canary. |
 | `FSD.md` | Locked specification (do not modify) |
 
 ## Build/Deploy Commands
