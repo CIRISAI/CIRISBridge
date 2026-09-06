@@ -51,6 +51,13 @@ Agents cannot serve this mission if users cannot reach them. CIRISBridge provide
 - Includes resilience patterns: CircuitBreaker, ExponentialBackoff (fixes LENS-001)
 - Clone with: `git clone --recurse-submodules`
 - Update with: `git submodule update --init --recursive`
+- CI (`deploy.yml`, `sonarcloud.yml`) uses `submodules: recursive` — SDK is always present at build time
+
+**CIRISProxy LiteLLM pin (2026-06-29):** `litellm==1.90.0` / base image `ghcr.io/berriai/litellm:v1.90.0`.
+- Bumped from 1.83.10 to fix CVE-2026-49468 (Critical — auth bypass via Host Header Injection, affects < 1.84.0)
+- `-stable` channel topped out at v1.83.14; v1.84+ ship without the suffix
+- Source of truth: `CIRISProxy/pyproject.toml` + `CIRISProxy/Dockerfile`
+- Note: `CIRISProxy/docs/THREAT_MODEL.md` still references 1.83.10 — needs updating in that repo
 
 ## Current Infrastructure
 

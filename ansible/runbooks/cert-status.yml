@@ -43,7 +43,7 @@
             {% if inventory_hostname == 'vultr' %}
             DOMAINS="billing1.{{ primary_domain }} proxy1.{{ primary_domain }} agents.{{ primary_domain }} lens.{{ primary_domain }} {{ primary_domain }}"
             {% else %}
-            DOMAINS="billing1.{{ eu_domain | default('ciris-services-eu-1.com') }} llm01.{{ eu_domain | default('ciris-services-eu-1.com') }} {{ eu_domain | default('ciris-services-eu-1.com') }}"
+            DOMAINS="billing1.{{ dns_soa }} proxy1.{{ dns_soa }} llm01.ciris-services-eu-1.com {{ dns_soa }}"
             {% endif %}
 
             FAILED=0
@@ -121,7 +121,7 @@
             {% if inventory_hostname == 'vultr' %}
             DOMAINS="billing1.{{ primary_domain }} proxy1.{{ primary_domain }} agents.{{ primary_domain }} lens.{{ primary_domain }} {{ primary_domain }}"
             {% else %}
-            DOMAINS="billing1.{{ eu_domain | default('ciris-services-eu-1.com') }} llm01.{{ eu_domain | default('ciris-services-eu-1.com') }} {{ eu_domain | default('ciris-services-eu-1.com') }}"
+            DOMAINS="billing1.{{ dns_soa }} proxy1.{{ dns_soa }} llm01.ciris-services-eu-1.com {{ dns_soa }}"
             {% endif %}
 
             EXPIRING_COUNT=0

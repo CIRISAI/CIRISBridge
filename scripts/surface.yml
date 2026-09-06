@@ -15,11 +15,12 @@ probes:
   - site_id: bridge-us-proxy-status
     url: https://llm01.ciris-services-1.ai/v1/status
     expect_status: 200
-  - site_id: bridge-us-lens-health
-    url: https://lens.ciris-services-1.ai/lens-api/health
+  # CIRISStatus (Node B) public scoring + status surface
+  - site_id: bridge-us-status-health
+    url: https://lens.ciris-services-1.ai/status/health
     expect_status: 200
-  - site_id: bridge-us-lens-status
-    url: https://lens.ciris-services-1.ai/lens-api/api/v1/status
+  - site_id: bridge-us-status-scoring
+    url: https://lens.ciris-services-1.ai/api/v1/scoring
     expect_status: 200
   - site_id: bridge-us-apex-health
     url: https://ciris-services-1.ai/health
@@ -27,24 +28,16 @@ probes:
 
   # EU region — bridge-eu, Hetzner, 46.224.81.217
   - site_id: bridge-eu-billing-health
-    url: https://billing1.ciris-services-eu-1.com/health
+    url: https://billing1.ciris-services-2.ai/health
     expect_status: 200
   - site_id: bridge-eu-billing-status
-    url: https://billing1.ciris-services-eu-1.com/v1/status
+    url: https://billing1.ciris-services-2.ai/v1/status
     expect_status: 200
   - site_id: bridge-eu-proxy-status
     url: https://llm01.ciris-services-eu-1.com/v1/status
     expect_status: 200
   - site_id: bridge-eu-apex-health
-    url: https://ciris-services-eu-1.com/health
-    expect_status: 200
-
-  # Lens federation directory — public accord routes
-  - site_id: lens-accord-traces
-    url: https://lens.ciris-services-1.ai/api/v1/accord/repository/traces?limit=1
-    expect_status: 200
-  - site_id: lens-accord-statistics
-    url: https://lens.ciris-services-1.ai/api/v1/accord/repository/statistics
+    url: https://ciris-services-2.ai/health
     expect_status: 200
 
 # TLS certs to capture (notAfter + days remaining + issuer)
@@ -53,9 +46,9 @@ tls:
   - llm01.ciris-services-1.ai
   - lens.ciris-services-1.ai
   - ciris-services-1.ai
-  - billing1.ciris-services-eu-1.com
+  - billing1.ciris-services-2.ai
   - llm01.ciris-services-eu-1.com
-  - ciris-services-eu-1.com
+  - ciris-services-2.ai
 
 # Internal state captures (require SSH access)
 internal:
@@ -63,7 +56,7 @@ internal:
     - name: us
       ssh: root@108.61.242.236
       ssh_key: ~/Desktop/ciris_transfer/.ciris_bridge_keys/cirisbridge_ed25519
-      containers: 8
+      containers: 7
     - name: eu
       ssh: root@46.224.81.217
       ssh_key: ~/Desktop/ciris_transfer/.ciris_bridge_keys/cirisbridge_ed25519

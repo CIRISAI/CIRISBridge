@@ -35,7 +35,7 @@ echo
 # 1. Surface scan (probes + TLS + internal)
 # ─────────────────────────────────────────────────────────────
 SNAPSHOT=/tmp/bridge-daily-$(date -u +%Y%m%d-%H%M).json
-python3 scripts/surface-scan.py --internal --out "$SNAPSHOT" --quiet 2>/dev/null
+timeout 30 python3 scripts/surface-scan.py --internal --out "$SNAPSHOT" --quiet 2>/dev/null || true
 
 python3 - "$SNAPSHOT" <<'PY'
 import json, sys
@@ -69,7 +69,9 @@ for h in s.get("internal", []):
     name = h["name"].upper()
     disk_pct = int(h.get("disk", {}).get("pct", "0%").rstrip("%") or 0)
     containers = h.get("container_count", 0)
-    expected = 8 if h["name"] == "us" else 5
+    # US count: 7 as of 2026-08-19 (ciris-server, ciris-status, ciris-proxy,
+    # ciris-caddy, ciris-billing, ciris-billing-spock, ciris-vault).
+    expected = 7 if h["name"] == "us" else 5
     spock = h.get("spock", "")
     spock_ok = "replicating" in str(spock).lower()
 
@@ -94,49 +96,68 @@ PY_EXIT=$?
 [ $PY_EXIT -ne 0 ] && WORST=2
 
 # ─────────────────────────────────────────────────────────────
-# 2. Lens /health all-ready (US only)
+# 2. CIRISServer (Node A) liveness — container running check
 # ─────────────────────────────────────────────────────────────
-SSH_US="ssh -i $HOME/Desktop/ciris_transfer/.ciris_bridge_keys/cirisbridge_ed25519 -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 root@108.61.242.236"
+# /v1/identity HTTP check RETIRED 2026-08-19: trace shipping moved to CEG/RNS
+# native; the read API (port 4243) is deprioritized when the event channel
+# floods under load. Container liveness is covered by the containers count above.
+SSH_US="ssh -i $HOME/Desktop/ciris_transfer/.ciris_bridge_keys/cirisbridge_ed25519 -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 root@108.61.242.236"
 
-LENS_HEALTH=$($SSH_US 'curl -sS --max-time 5 http://localhost:8200/health 2>&1' 2>/dev/null || echo '{}')
-ALL_READY=$(echo "$LENS_HEALTH" | python3 -c "import json,sys
-try:
-    d=json.load(sys.stdin); p=d.get('persist_engine',{})
-    ok = all([p.get('scrubber_ready'),p.get('steward_ready'),p.get('steward_pqc_ready')]) and not p.get('init_error')
-    print('1' if ok else '0')
-except: print('0')" 2>/dev/null)
-if [ "$ALL_READY" = "1" ]; then
-  pass "lens /health: scrubber + steward + steward_pqc all ready"
+SERVER_UP=$($SSH_US 'docker inspect -f "{{.State.Running}}" ciris-server 2>/dev/null' 2>/dev/null)
+if [ "$SERVER_UP" = "true" ]; then
+  pass "ciris-server: container running"
 else
-  fail "lens /health: NOT all-ready"
+  fail "ciris-server: container not running (was: $SERVER_UP)"
 fi
 
 # ─────────────────────────────────────────────────────────────
-# 3. Heartbeat freshness — both regions must have one in last 30 min
+# 3. Heartbeat freshness — RETIRED 2026-06-25.
 # ─────────────────────────────────────────────────────────────
-HEARTBEATS=$($SSH_US "docker exec cirislens-db psql -U cirislens -d cirislens -tAc \"
-SELECT server_id || ':' || EXTRACT(EPOCH FROM (NOW() - MAX(timestamp)))::int
-FROM cirislens.service_logs
-WHERE service_name='ciris-scheduler' AND server_id IN ('us','eu')
-  AND timestamp > NOW() - INTERVAL '60 minutes'
-GROUP BY server_id ORDER BY 1;\"" 2>/dev/null)
+# Scheduler timers POST heartbeats to /lens-api/api/v1/logs/ingest, which
+# Caddy 404s post-cutover (2026-06-17). cirislens.service_logs hasn't received
+# a new heartbeat since the cutover, so checking against it perpetually fails.
+# Real fleet liveness is covered by the probe + container + errors checks above.
+# Re-enable after the scheduler is repointed at ciris-server's CEG ingest.
 
-for region in us eu; do
-  AGE_S=$(echo "$HEARTBEATS" | grep "^$region:" | cut -d: -f2)
-  AGE_MIN=$(( ${AGE_S:-9999} / 60 ))
-  if [ "$AGE_MIN" -lt 30 ]; then
-    pass "$region heartbeat: ${AGE_MIN}min ago"
-  elif [ "$AGE_MIN" -lt 60 ]; then
-    warn "$region heartbeat: ${AGE_MIN}min ago (expected ≤20)"
+# ─────────────────────────────────────────────────────────────
+# 3a. Conntrack table — raised to 524288 after 2026-08-20 freeze
+#     Alert at >80% to give time to react before exhaustion.
+# ─────────────────────────────────────────────────────────────
+CT_COUNT=$($SSH_US 'cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null' 2>/dev/null)
+CT_MAX=$($SSH_US 'cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null' 2>/dev/null)
+if [ -n "$CT_COUNT" ] && [ -n "$CT_MAX" ] && [ "$CT_MAX" -gt 0 ]; then
+  CT_PCT=$(( CT_COUNT * 100 / CT_MAX ))
+  if [ "$CT_PCT" -lt 80 ]; then
+    pass "conntrack (us): ${CT_COUNT}/${CT_MAX} (${CT_PCT}%)"
+  elif [ "$CT_PCT" -lt 95 ]; then
+    warn "conntrack (us): ${CT_COUNT}/${CT_MAX} (${CT_PCT}%) — approaching limit"
   else
-    fail "$region heartbeat: ${AGE_MIN}min ago (alert threshold breached)"
+    fail "conntrack (us): ${CT_COUNT}/${CT_MAX} (${CT_PCT}%) — near exhaustion (risk of network freeze)"
   fi
-done
+else
+  warn "conntrack (us): could not read /proc/sys/net/netfilter/nf_conntrack_count"
+fi
+
+SSH_EU="ssh -i $HOME/Desktop/ciris_transfer/.ciris_bridge_keys/cirisbridge_ed25519 -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 root@46.224.81.217"
+CT_COUNT_EU=$($SSH_EU 'cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null' 2>/dev/null)
+CT_MAX_EU=$($SSH_EU 'cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null' 2>/dev/null)
+if [ -n "$CT_COUNT_EU" ] && [ -n "$CT_MAX_EU" ] && [ "$CT_MAX_EU" -gt 0 ]; then
+  CT_PCT_EU=$(( CT_COUNT_EU * 100 / CT_MAX_EU ))
+  if [ "$CT_PCT_EU" -lt 80 ]; then
+    pass "conntrack (eu): ${CT_COUNT_EU}/${CT_MAX_EU} (${CT_PCT_EU}%)"
+  elif [ "$CT_PCT_EU" -lt 95 ]; then
+    warn "conntrack (eu): ${CT_COUNT_EU}/${CT_MAX_EU} (${CT_PCT_EU}%) — approaching limit"
+  else
+    fail "conntrack (eu): ${CT_COUNT_EU}/${CT_MAX_EU} (${CT_PCT_EU}%) — near exhaustion"
+  fi
+else
+  warn "conntrack (eu): could not read conntrack count"
+fi
 
 # ─────────────────────────────────────────────────────────────
 # 4. Error rate (last 30min, container logs)
 # ─────────────────────────────────────────────────────────────
-SSH_EU="ssh -i $HOME/Desktop/ciris_transfer/.ciris_bridge_keys/cirisbridge_ed25519 -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 root@46.224.81.217"
+SSH_EU="ssh -i $HOME/Desktop/ciris_transfer/.ciris_bridge_keys/cirisbridge_ed25519 -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 root@46.224.81.217"
 
 US_ERRS=$($SSH_US 'for c in ciris-billing ciris-proxy ciris-caddy cirislens-api ciris-billing-spock; do
   docker logs --since 30m $c 2>&1 | grep -ciE "error|exception|panic|fatal|aborted" | head -1
