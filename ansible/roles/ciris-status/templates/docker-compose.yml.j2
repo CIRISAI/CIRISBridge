@@ -1,0 +1,56 @@
+---
+# ciris-status (Node B) — ciris-server node + StatusAdapter, v0.3.0 zero-env.
+# Boot inputs are the --home + --key-id CLI flags. NO env vars are read by the
+# node (CIRIS_SERVER_*) or the adapter (STATUS_*). All non-default config is
+# authored as signed config:* CEG objects via the API after ownership is claimed.
+# Replication peering is wired by the operator at runtime — NOT in this compose.
+# Runbook: ../../CIRISStatus/DEPLOY.md, BRIDGE_UPGRADE_v0.5.0.md §9.
+
+services:
+  ciris-status:
+    image: {{ ciris_status_image }}
+    container_name: ciris-status
+    restart: unless-stopped
+    # Unbounded json-file logs are a disk-fill path, and on this node a full
+    # disk fail-safe demotes ciris-server out of its federation role
+    # (lens_store=false). Cap every container: 3 x 50 MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    mem_limit: 1536m
+    # EXPERIMENT (CIRISStatus#69): cap glibc malloc arenas.
+    #
+    # This node's heap is ~97% allocator free lists, not live data —
+    # /api/v1/debug/memory reports live_fraction 0.03: ~44 MB live against
+    # ~1.4 GB held. The held memory is fragmented across ~1800 chunks in
+    # several arenas, so keepcost stays at 3.1 MB and malloc_trim can return
+    # almost nothing. Capping arenas is the lever that actually applies:
+    # the same churn recycles through a smaller pool instead of each arena
+    # growing its own free lists.
+    #
+    # NOTE this is a libc tunable, NOT application config — the node's
+    # zero-env boot contract (no CIRIS_SERVER_* / STATUS_* vars) is intact.
+    environment:
+      MALLOC_ARENA_MAX: "2"
+    # Two CLI flags, no environment: block.
+    command: ["--home", "{{ ciris_status_home }}", "--key-id", "{{ ciris_status_key_id }}"]
+    volumes:
+      # This node's OWN corpus + identity volume — NEVER mount Node A's data/.
+      - {{ ciris_status_data_dir }}:{{ ciris_status_home }}
+    ports:
+      # Status node read-API on host port 4253 (A holds 4243 on the host).
+      # Remote agents post the delegation claim to http://<host>:4253/...
+      - "4253:{{ ciris_status_read_port }}"
+      # Reticulum (:4242) stays unpublished — A is the seed; peers discover B
+      # through A's transport node forwarding on the docker network.
+    networks:
+      - cirislens
+    # No healthcheck — image is Rust-binary distroless-style (no shell tools).
+    # Liveness verified by the smoke probe + Caddy 502 detection + daily-status.
+
+networks:
+  cirislens:
+    external: true
+    name: lens_cirislens

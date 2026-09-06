@@ -63,12 +63,42 @@
     - proxy
   tags: [proxy]
 
-- name: Deploy CIRISLens (US node only - centralized observability)
+# RETIRED 2026-06-17: CIRISLens replaced by CIRISServer (Node A) + CIRISStatus (Node B).
+# Lens Python ingest + TimescaleDB + Grafana are gone; lens *function* lives inside
+# ciris-server (the abi3 wheel — pip install ciris-server==0.3.0). Same hostname,
+# new endpoint surface (GET /lens/api/v1/* + /v1/identity), same federation identity
+# (Ed25519 + ML-DSA-65 + RNS adopted byte-identically — no re-key).
+# Cutover history: 0.1.1 rolled back (missing /v1/identity, CIRISServer#5);
+# 0.3.0 ships on persist v8.4.0 / verify v5.10.0 (DSAR-gate met).
+# Runbook: ../../CIRISServer/FSD/LENS_TO_SERVER_MIGRATION.md
+# Role + dashboards retained at roles/lens/ for archival; cirislens-db kept up
+# (read-only) until the import-traces seeding completes.
+# - name: Deploy CIRISLens (US node only - centralized observability)
+#   hosts: all
+#   become: true
+#   roles:
+#     - lens
+#   tags: [lens]
+
+# Deploy CIRISStatus (Node B) — public scoring-feed monitor — first per DEPLOY.md §3.
+# Path route /status/* on lens.ciris-services-1.ai. Initial deploy is prober-only;
+# fabric mode (Flow A/B) enables when ciris-server (Node A) is up and we wire
+# STATUS_CORPUS_DSN.
+- name: Deploy CIRISStatus (US node only - Node B, public scoring-feed monitor)
   hosts: all
   become: true
   roles:
-    - lens
-  tags: [lens]
+    - ciris-status
+  tags: [ciris-status, status]
+
+# Deploy CIRISServer (Node A) — the fabric node, lens slice. Hard cutover from
+# CIRISLens. Same hostname, new endpoint surface.
+- name: Deploy CIRISServer (US node only - fabric node, lens slice at 0.3)
+  hosts: all
+  become: true
+  roles:
+    - ciris-server
+  tags: [ciris-server, server]
 
 - name: Deploy Scheduler (systemd timers for health checks)
   hosts: all

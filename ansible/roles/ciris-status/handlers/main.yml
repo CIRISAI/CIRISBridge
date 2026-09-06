@@ -1,0 +1,6 @@
+---
+- name: Restart CIRISStatus
+  community.docker.docker_compose_v2:
+    project_src: "{{ ciris_status_build_dir }}"
+    state: present
+    pull: always

@@ -1,0 +1,66 @@
+---
+# CIRISServer — the fabric node (v0.5.0, zero-env CLI-flag boot).
+# Boot inputs are the --home + --key-id flags in the Dockerfile ENTRYPOINT.
+# All non-default config is authored as signed config:* CEG objects via the
+# API after ownership is claimed (NodeCode + PIN), per
+# ../../CIRISServer/FSD/BRIDGE_UPGRADE_v0.5.0.md §7.
+
+services:
+  ciris-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: {{ ciris_server_image_tag }}
+    container_name: ciris-server
+    restart: unless-stopped
+    # Unbounded json-file logs are a disk-fill path, and on this node a full
+    # disk fail-safe demotes ciris-server out of its federation role
+    # (lens_store=false). Cap every container: 3 x 50 MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    mem_limit: 2048m  # OOM loop containment — 0.5.183 RSS peaks at ~1.8GB; 2GB gives headroom without risking host kernel
+    # The zero-env policy is about node CONFIG — that is still authored as
+    # signed config:* CEG objects via the API after ownership is claimed.
+    # Everything below is an operator/runtime switch, NOT config, which is why
+    # 0.5.199 made diagnostics a runtime gate rather than a build feature.
+    environment:
+      # Prod signal for the test-anchor tripwire (#[cfg(feature = "test-anchor")] in edge).
+      # The tripwire hard-refuses test-anchor activation when it reads production/prod/staging.
+      CIRIS_ENVIRONMENT: "production"
+      # Operator diagnostics (CIRISServer#549/#550, 0.5.199+): mounts the
+      # loopback-only GET /v1/node/diagnostics/memory plus the boot compose
+      # marks. Off unless set; accepts 1|true|yes. Loopback-only means a
+      # request via the published port arrives from the docker bridge gateway
+      # and is refused — read it with `docker exec`, not from the host.
+      CIRIS_DIAGNOSTICS: "1"
+      # glibc arena cap — the same knob ciris-status runs with. On that node it
+      # cut committed 1458 -> 611 MB (-58%) with live memory unchanged at
+      # ~44 MB (CIRISStatus#69). Here it also makes the diagnostics readable:
+      # with <=1 thread heap, mallinfo2.arena is essentially the brk [heap], so
+      # fordblks-vs-uordblks reads as that heap's composition instead of being
+      # blurred across the 15 arenas glibc creates by default on 2 vCPU.
+      MALLOC_ARENA_MAX: "2"
+    volumes:
+      # Single persistent volume — adopted identities (sealed Ed25519 + ML-DSA-65
+      # + RNS), SQLite corpus, Reticulum storage. Owned by uid 1000 on the host.
+      # Mount target matches --home flag in the Dockerfile.
+      - {{ ciris_server_data_dir }}:{{ ciris_server_home }}
+    ports:
+      # Read API (HTTP, net.listen_addr + 1) — bound 0.0.0.0 so remote agents
+      # can hit /v1/auth/device/claim directly without going through Caddy.
+      - "{{ ciris_server_read_port }}:{{ ciris_server_read_port }}"
+      # Reticulum transport (net.listen_addr) — public so federation peers reach it.
+      - "{{ ciris_server_reticulum_port }}:{{ ciris_server_reticulum_port }}/udp"
+      - "{{ ciris_server_reticulum_port }}:{{ ciris_server_reticulum_port }}/tcp"
+    networks:
+      - cirislens   # shared with caddy + ciris-status for the read-API + mesh DNS
+    # No healthcheck: python:3.12-slim has no curl/wget/bash. Liveness is verified
+    # by the smoke probe in the ansible role + Caddy reverse-proxy 502s + daily-status.
+
+networks:
+  cirislens:
+    external: true
+    name: lens_cirislens

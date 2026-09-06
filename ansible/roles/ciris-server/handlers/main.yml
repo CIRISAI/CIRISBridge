@@ -1,0 +1,6 @@
+---
+- name: Restart CIRISServer
+  community.docker.docker_compose_v2:
+    project_src: "{{ ciris_server_build_dir }}"
+    state: present
+    build: always   # ensure Dockerfile changes (e.g. version bump) propagate

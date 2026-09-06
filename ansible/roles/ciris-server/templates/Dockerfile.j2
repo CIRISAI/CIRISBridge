@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+# ciris-server is the abi3 PyO3 wheel: substrate + lens slice baked in,
+# no build deps required (manylinux bundles libtss2 + libcrypto via auditwheel).
+# Per ../../CIRISServer/FSD/LENS_TO_SERVER_MIGRATION.md §2 + §3.1.
+RUN pip install --no-cache-dir ciris-server=={{ ciris_server_version }}
+
+# Match the host uid:gid we own /data/cirisserver with (linuxuser:1000)
+RUN useradd --uid 1000 --no-create-home --shell /usr/sbin/nologin ciris
+USER 1000:1000
+
+# v0.5.2 honors --home / --key-id (CIRISServer#27 + #32). The wire/directory
+# identity becomes "<key_id>-<b32(sha256(pubkey))>" via derive_key_id; the
+# on-disk keystore alias stays bare so no re-key on label change.
+ENTRYPOINT ["ciris-server", "--home", "{{ ciris_server_home }}", "--key-id", "{{ ciris_server_key_id }}"]

@@ -1,0 +1,250 @@
+---
+# Deploy CIRISServer — the fabric node (v0.5.0, zero-env CLI-flag boot).
+# Replaces the retired CIRISLens deployment.
+# Boot inputs (Dockerfile ENTRYPOINT): --home + --key-id. NO env vars are read.
+# All non-default config is authored as signed config:* CEG objects via the API
+# after ownership is claimed (NodeCode + PIN), per BRIDGE_UPGRADE_v0.5.0 §7.
+#
+# Production: US node only.
+
+- name: Check if this is a server node
+  ansible.builtin.set_fact:
+    is_ciris_server_node: "{{ (node_name | default('') == 'us') or (deploy_ciris_server | default(false)) }}"
+
+- name: Skip if not a server node
+  ansible.builtin.debug:
+    msg: "Skipping CIRISServer deployment — only runs on US/server nodes"
+  when: not is_ciris_server_node
+
+- name: Deploy CIRISServer
+  when: is_ciris_server_node
+  block:
+    # Backup existing data + identity before any upgrade (runbook §2 "do NOT skip").
+    # No-op on first deploy (no source). Idempotent: backups carry their own bak suffix
+    # and won't overwrite each other beyond the most recent.
+    - name: Check whether prior CIRISServer data exists (for backup decision)
+      ansible.builtin.stat:
+        path: "{{ ciris_server_data_dir }}/data"
+      register: existing_data
+
+    # Each snapshot is a full copy of the corpus (~1.4 GB and growing). This task
+    # ran on EVERY deploy and pruned nothing: by 2026-08-28 it had accumulated
+    # 186 snapshots / 29 GB dating back to July, filling the 75 GB disk to 96%.
+    # That dropped free space under ciris-server's baked 5 GiB lens-store
+    # minimum, so the node fail-safe demoted ITSELF out of its federation role
+    # (`host capabilities disk_free_gib=3 lens_store=false` -> "running as a
+    # Reticulum relay node only"). A backup policy took the canonical offline.
+    # Retention is now bounded here, and pruning happens BEFORE the new copy so
+    # a nearly-full disk cannot be tipped over by the snapshot itself.
+    - name: Prune old upgrade snapshots (keep {{ ciris_server_bak_retain }})
+      ansible.builtin.shell: |
+        set -o pipefail
+        for kind in data identity; do
+          ls -d {{ ciris_server_data_dir }}/${kind}.bak.* 2>/dev/null \
+            | sort \
+            | head -n -{{ ciris_server_bak_retain }} \
+            | xargs -r rm -rf
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      when: not (ciris_server_fresh | default(false))
+      changed_when: false
+
+    - name: Snapshot data + identity dirs to .bak before upgrade
+      ansible.builtin.shell: |
+        set -e
+        ts=$(date -u +%Y%m%dT%H%M%SZ)
+        cp -a {{ ciris_server_data_dir }}/data     {{ ciris_server_data_dir }}/data.bak.$ts
+        cp -a {{ ciris_server_data_dir }}/identity {{ ciris_server_data_dir }}/identity.bak.$ts
+        echo "$ts" > {{ ciris_server_data_dir }}/.last-upgrade-bak
+        # Re-prune so the retention count includes the snapshot just taken.
+        for kind in data identity; do
+          ls -d {{ ciris_server_data_dir }}/${kind}.bak.* 2>/dev/null \
+            | sort | head -n -{{ ciris_server_bak_retain }} | xargs -r rm -rf
+        done
+      args:
+        executable: /bin/bash
+      when: existing_data.stat.exists and not (ciris_server_fresh | default(false))
+      changed_when: true
+
+    # A snapshot must never be what pushes the node under its lens-store
+    # minimum. Fail loudly instead of silently demoting the canonical.
+    - name: Assert disk headroom above the lens-store minimum after snapshotting
+      ansible.builtin.shell: |
+        df -BG --output=avail {{ ciris_server_data_dir }} | tail -1 | tr -dc '0-9'
+      args:
+        executable: /bin/bash
+      register: ciris_server_disk_free
+      changed_when: false
+
+    - name: FAIL — disk below lens-store minimum (node would demote to relay-only)
+      ansible.builtin.fail:
+        msg: |
+          Only {{ ciris_server_disk_free.stdout | trim }} GiB free on {{ ciris_server_data_dir }},
+          below ciris-server's baked lens-store minimum of {{ ciris_server_lens_store_min_gib }} GiB.
+          Booting now would fail-safe demote this node to a Reticulum relay
+          (lens_store=false: no local corpus, scorer/holonomic/replication off).
+          Free disk before deploying — check for stale snapshots:
+            du -shc {{ ciris_server_data_dir }}/*.bak.* 2>/dev/null | tail -1
+      when: (ciris_server_disk_free.stdout | trim | int) < (ciris_server_lens_store_min_gib | int)
+
+    # Wipe state only if explicitly requested. The v0.5.0 upgrade preserves identity
+    # byte-identically — never wipe on a routine redeploy.
+    - name: Clear prior CIRISServer data dir (only if ciris_server_fresh=true)
+      ansible.builtin.file:
+        path: "{{ ciris_server_data_dir }}"
+        state: absent
+      when: ciris_server_fresh | default(false)
+
+    - name: Create CIRISServer build + data directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ ciris_server_build_dir }}",         owner: root, group: root, mode: "0755" }
+        - { path: "{{ ciris_server_data_dir }}",          owner: "1000", group: "1000", mode: "0755" }
+        - { path: "{{ ciris_server_data_dir }}/identity", owner: "1000", group: "1000", mode: "0700" }
+
+    # Per BRIDGE_SEED_MESH.md: this role is now a FRESH-MINT flow. The
+    # lens-steward seed-staging tasks (Ed25519 + ML-DSA-65 + RNS adoption from
+    # the retired CIRISLens keyring) are gone — the wheel mints its own hybrid
+    # identity under --key-id ciris-canonical-1 on a wiped home.
+
+    - name: Template Dockerfile (ciris-server wheel install + CLI flags)
+      ansible.builtin.template:
+        src: Dockerfile.j2
+        dest: "{{ ciris_server_build_dir }}/Dockerfile"
+        mode: "0644"
+      notify: Restart CIRISServer
+
+    - name: Template docker-compose.yml (zero-env)
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: "{{ ciris_server_build_dir }}/docker-compose.yml"
+        mode: "0644"
+      notify: Restart CIRISServer
+
+    - name: Open Reticulum transport port (UDP + TCP)
+      community.general.ufw:
+        rule: allow
+        port: "{{ ciris_server_reticulum_port }}"
+        proto: "{{ item }}"
+      loop:
+        - udp
+        - tcp
+
+    - name: Start CIRISServer
+      community.docker.docker_compose_v2:
+        project_src: "{{ ciris_server_build_dir }}"
+        state: present
+        build: always
+
+    - name: Wait for CIRISServer read API
+      ansible.builtin.wait_for:
+        port: "{{ ciris_server_read_port }}"
+        delay: 5
+        timeout: 240
+
+    # The old budget here was 6 retries x 5s. On this 2-vCPU box the read API
+    # can take ~3 min to answer, so the probe failed on EVERY deploy —
+    # including 0.5.193, which was genuinely broken (CIRISServer#501). A check
+    # that always fails cannot signal anything, so it is widened here and the
+    # failure is classified below rather than raised blind.
+    - name: Smoke probe — /v1/identity returns 200 with six-key aggregate
+      ansible.builtin.uri:
+        url: "http://localhost:{{ ciris_server_read_port }}/v1/identity"
+        return_content: true
+        timeout: 10
+      register: ciris_server_identity
+      retries: 24
+      delay: 10
+      until: ciris_server_identity.status == 200
+      failed_when: false
+
+    # A port that is LISTENING while its accept queue grows means the socket is
+    # bound but userspace never calls accept() — the CIRISServer#501 hang.
+    # Recv-Q on a LISTEN socket is the count of completed connections waiting to
+    # be accepted; healthy is 0. This is what distinguishes "still booting"
+    # (nothing bound / queue empty) from "hung" (bound, queue climbing).
+    - name: Classify read-API failure (accept-loop hang vs slow boot)
+      ansible.builtin.shell: |
+        set -o pipefail
+        pid=$(docker inspect ciris-server --format '{% raw %}{{.State.Pid}}{% endraw %}' 2>/dev/null) || exit 0
+        [ -n "$pid" ] || exit 0
+        nsenter -t "$pid" -n ss -tln 2>/dev/null \
+          | awk '$1 == "LISTEN" && $4 ~ /:{{ ciris_server_read_port }}$/ { print $2; exit }'
+      args:
+        executable: /bin/bash
+      register: ciris_server_acceptq
+      changed_when: false
+      failed_when: false
+      when: ciris_server_identity.status != 200
+
+    - name: FAIL — read API bound but not accepting (CIRISServer#501)
+      ansible.builtin.fail:
+        msg: |
+          ciris-server {{ ciris_server_version }} bound :{{ ciris_server_read_port }} but is NOT accepting
+          connections — {{ ciris_server_acceptq.stdout | trim }} completed connection(s) are queued and
+          unaccepted (healthy = 0). The process is alive; its accept loop is starved.
+
+          This is the CIRISServer#501 / #446 failure mode: on a 2-vCPU host the
+          tokio runtime gets 2 workers, and one saturated worker makes HTTP
+          unschedulable. Confirm and instrument with:
+
+            pid=$(docker inspect ciris-server --format '{% raw %}{{.State.Pid}}{% endraw %}')
+            nsenter -t $pid -n ss -tln | grep :{{ ciris_server_read_port }}   # Recv-Q climbing
+            top -H -b -n1 -p $pid                                # a worker pegged at high %CPU
+
+          Roll back by setting ciris_server_version to the last good release
+          and re-running this play.
+      when:
+        - ciris_server_identity.status != 200
+        - (ciris_server_acceptq.stdout | default('0') | trim | int) > 0
+
+    - name: FAIL — read API never came up
+      ansible.builtin.fail:
+        msg: |
+          ciris-server {{ ciris_server_version }} did not answer /v1/identity within 4 minutes
+          and its accept queue is empty, so it is not the #501 hang — the node
+          is still booting, crashed, or never bound. Check:
+            docker logs ciris-server --tail 50
+            docker inspect ciris-server --format '{% raw %}{{.State.Status}} restarts={{.RestartCount}}{% endraw %}'
+      when: ciris_server_identity.status != 200
+
+    - name: Smoke probe — /lens/api/v1/scores returns 200
+      ansible.builtin.uri:
+        url: "http://localhost:{{ ciris_server_read_port }}/lens/api/v1/scores"
+        return_content: false
+        status_code: [200]
+      retries: 3
+      delay: 3
+
+    # Surface ownership-claim banner if this is an unclaimed/fresh boot.
+    # The PIN is one-shot console/log only — never served over HTTP (runbook §7).
+    - name: Capture OWNERSHIP UNCLAIMED banner + NodeCode + PIN (if present)
+      ansible.builtin.shell: |
+        docker logs ciris-server 2>&1 \
+          | grep -E "OWNERSHIP UNCLAIMED|NodeCode|claim PIN|claim_pin" \
+          | tail -8 || true
+      register: ownership_banner
+      changed_when: false
+
+    - name: Log identity-continuity + ownership summary
+      ansible.builtin.debug:
+        msg: |
+          CIRISServer v{{ ciris_server_version }} up.
+          key_id        = {{ (ciris_server_identity.content | from_json).key_id | default('?') }}
+          identity_hash = {{ (ciris_server_identity.content | from_json).identity_hash | default('?') }}
+          pqc_key_id    = {{ (ciris_server_identity.content | from_json).pqc_key_id | default('?') }}
+          (compare key_id to the prior 0.4.x value — byte-identical = no re-key)
+
+          {% if ownership_banner.stdout | length > 0 %}
+          Ownership banner (founder claim — NodeCode + PIN are one-shot, console only):
+          {{ ownership_banner.stdout | indent(4) }}
+          {% else %}
+          (No OWNERSHIP UNCLAIMED banner — node already owned or banner already scrolled off.)
+          {% endif %}
