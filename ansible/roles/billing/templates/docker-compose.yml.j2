@@ -5,6 +5,15 @@ services:
     image: {{ billing_image }}
     container_name: ciris-billing
     restart: unless-stopped
+    # Unbounded json-file logs are a disk-fill path, and on this node a full
+    # disk fail-safe demotes ciris-server out of its federation role
+    # (lens_store=false). Cap every container: 3 x 50 MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    mem_limit: 512m
     env_file:
       - .env
     volumes:

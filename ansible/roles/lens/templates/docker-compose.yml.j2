@@ -14,6 +14,15 @@ services:
     image: timescale/timescaledb:latest-pg15
     container_name: cirislens-db
     restart: unless-stopped
+    # Unbounded json-file logs are a disk-fill path, and on this node a full
+    # disk fail-safe demotes ciris-server out of its federation role
+    # (lens_store=false). Cap every container: 3 x 50 MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    mem_limit: 768m
     environment:
       POSTGRES_USER: {{ lens_db_user | default('cirislens') }}
       POSTGRES_PASSWORD: {{ lens_db_password }}
@@ -36,6 +45,15 @@ services:
     image: grafana/grafana:{{ lens_grafana_version | default('latest') }}
     container_name: cirislens-grafana
     restart: unless-stopped
+    # Unbounded json-file logs are a disk-fill path, and on this node a full
+    # disk fail-safe demotes ciris-server out of its federation role
+    # (lens_store=false). Cap every container: 3 x 50 MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    mem_limit: 512m
     environment:
       # Admin credentials
       GF_SECURITY_ADMIN_USER: {{ lens_grafana_admin_user | default('admin') }}
@@ -95,6 +113,15 @@ services:
     image: {{ lens_api_image | default('ghcr.io/cirisai/cirislens-api:latest') }}
     container_name: cirislens-api
     restart: unless-stopped
+    # Unbounded json-file logs are a disk-fill path, and on this node a full
+    # disk fail-safe demotes ciris-server out of its federation role
+    # (lens_store=false). Cap every container: 3 x 50 MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    mem_limit: 512m
     environment:
       DATABASE_URL: postgresql://{{ lens_db_user | default('cirislens') }}:{{ lens_db_password | regex_replace('/', '%2F') }}@postgres:5432/{{ lens_db_name | default('cirislens') }}
       ENV: production
@@ -155,6 +182,10 @@ services:
       CIRISLENS_SCRUBBER_DIVERGENCE_LOG: /app/logs/scrubber_divergence.jsonl
       # Persistent keyring for SoftwareSigner — guarantees stable lens identity across restarts
       CIRIS_DATA_DIR: /var/lib/cirislens/keyring
+      # Edge (Reticulum) transport identity — minted on first request, persisted to keyring
+      # volume, reused on restart. Lights up reticulum_x25519_pubkey_b64 / reticulum_ed25519_pubkey_b64
+      # on /api/v1/identity. If unset, the endpoint cleanly falls back to the 4-of-6 bundle.
+      CIRISLENS_EDGE_IDENTITY_PATH: /var/lib/cirislens/keyring/lens-edge.identity
       # Phase 2a flag — ON for 61da62f capture (lens-side body_sha256_prefix
       # added to PERSIST_DELEGATE_REJECT lines; cross-layer join key for v0.1.18).
       CIRISLENS_USE_PERSIST_ENGINE: "true"

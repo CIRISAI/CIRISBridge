@@ -5,6 +5,15 @@ services:
     image: {{ proxy_image }}
     container_name: ciris-proxy
     restart: unless-stopped
+    # Unbounded json-file logs are a disk-fill path, and on this node a full
+    # disk fail-safe demotes ciris-server out of its federation role
+    # (lens_store=false). Cap every container: 3 x 50 MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    mem_limit: 1500m
     command: ["--port", "4000", "--config", "/app/config.yaml"]
     ports:
       - "127.0.0.1:{{ proxy_port }}:4000"
