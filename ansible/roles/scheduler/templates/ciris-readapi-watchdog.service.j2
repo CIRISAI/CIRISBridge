@@ -1,0 +1,16 @@
+[Unit]
+Description=CIRISBridge read-API Watchdog — restarts ciris-server when its read API hangs (CIRISServer#506)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ciris/scheduler/ciris-readapi-watchdog.sh
+Restart=always
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

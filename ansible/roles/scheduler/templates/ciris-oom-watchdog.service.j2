@@ -1,0 +1,16 @@
+[Unit]
+Description=CIRISBridge OOM Watchdog — live stream, reboots if ciris-server/ciris-status is OOM-looping
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ciris/scheduler/ciris-oom-watchdog.sh
+Restart=always
+RestartSec=5
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

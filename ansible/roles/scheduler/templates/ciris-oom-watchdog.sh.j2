@@ -1,0 +1,146 @@
+#!/bin/sh
+# ciris-oom-watchdog.sh — real OOM-kill detector for ciris-server / ciris-status.
+#
+# WHAT IT WATCHES, AND WHY NOT exitCode=137
+#
+# A previous version of this watchdog treated a container `die` event with
+# exitCode=137 as an OOM kill. That is wrong: 137 just means "killed by
+# SIGKILL", and Docker SIGKILLs a container whenever it does not exit within
+# the stop grace period — which happens on every ordinary redeploy of a slow
+# shutdown. On 2026-08-28 three redeploys inside fifteen minutes tripped the
+# escalation and REBOOTED PRODUCTION, sealing the vault, with no OOM condition
+# anywhere on the box (kernel OOM events: 0, cgroup oom_kill: 0).
+#
+# The authoritative signal is the cgroup's own counter:
+#     /sys/fs/cgroup/system.slice/docker-<id>.scope/memory.events -> oom_kill N
+# It increments ONLY when the kernel's cgroup OOM killer fires. A deploy
+# SIGKILL, `docker stop`, `docker rm -f`, or a clean exit never touch it.
+#
+# Because the counter is CUMULATIVE, polling cannot miss an event the way an
+# event-stream can (dockerd's event ring buffer is capped and evicts under
+# healthcheck traffic). So this is a poll loop, not a stream.
+#
+# A container recreate gives a NEW container id and a fresh counter starting at
+# 0. That is tracked explicitly: when the id changes we re-baseline and never
+# report a delta across the boundary, so a redeploy can never look like a kill.
+#
+# Escalation: REBOOT_THRESHOLD real OOM kills for the same container inside
+# WINDOW_SECS reboots the host to break a genuine OOM loop before the kernel
+# freezes the box. Kill timestamps live in /run (tmpfs), so a reboot resets them.
+#
+# Deployed by Ansible: roles/scheduler/tasks/main.yml (US node only).
+
+set -u
+
+LOG=/var/log/ciris/oom-watchdog.log
+STATE_DIR=/run/ciris-watchdog
+POLL_SECS=20
+WINDOW_SECS=900        # rolling window for the reboot escalation (15 min)
+REBOOT_THRESHOLD=3     # real OOM kills in that window before rebooting
+CONTAINERS="ciris-server ciris-status"
+
+LENS_ENDPOINT="{{ cirislens_endpoint }}/lens-api/api/v1/logs/ingest"
+SERVICE_TOKEN="{{ scheduler_service_token | default('') }}"
+NODE_NAME="{{ node_name | default('us') }}"
+
+mkdir -p "$STATE_DIR" "$(dirname "$LOG")"
+
+ts()  { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+log() { printf "%s %s\n" "$(ts)" "$*" | tee -a "$LOG"; }
+
+# Locate a container's memory.events across cgroup layouts. Empty if not found.
+events_path() {
+    _id="$1"
+    for p in "/sys/fs/cgroup/system.slice/docker-${_id}.scope/memory.events" \
+             "/sys/fs/cgroup/docker/${_id}/memory.events" \
+             "/sys/fs/cgroup/memory/docker/${_id}/memory.events"; do
+        [ -f "$p" ] && { printf '%s' "$p"; return 0; }
+    done
+    printf ''
+}
+
+oom_kill_count() {
+    _path="$1"
+    [ -n "$_path" ] || { printf ''; return 0; }
+    awk '$1 == "oom_kill" { print $2; found=1 } END { if (!found) print "" }' "$_path" 2>/dev/null
+}
+
+alert_lens() {
+    _c="$1"; _delta="$2"; _win="$3"
+    [ -z "$SERVICE_TOKEN" ] && return 0
+    _payload=$(cat <<EOF
+{
+  "service_name": "ciris-oom-watchdog",
+  "server_id": "${NODE_NAME}",
+  "level": "CRITICAL",
+  "message": "cgroup_oom_kill",
+  "event": "oom_kill",
+  "timestamp": "$(ts)",
+  "attributes": {
+    "node": "${NODE_NAME}",
+    "container": "${_c}",
+    "oom_kills_this_check": "${_delta}",
+    "oom_kills_in_window": "${_win}",
+    "source": "cgroup memory.events oom_kill"
+  }
+}
+EOF
+)
+    curl -s -o /dev/null -X POST "${LENS_ENDPOINT}" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${SERVICE_TOKEN}" \
+        -d "${_payload}" --connect-timeout 5 --max-time 10 2>/dev/null || true
+}
+
+log "INFO: watchdog starting — cgroup oom_kill counters for: $CONTAINERS"
+
+while true; do
+    for name in $CONTAINERS; do
+        cid=$(docker inspect "$name" --format '{{ '{{' }}.Id{{ '}}' }}' 2>/dev/null) || continue
+        [ -n "$cid" ] || continue
+
+        ev=$(events_path "$cid")
+        cur=$(oom_kill_count "$ev")
+        # No counter (cgroup v1 without the file, or container gone): skip
+        # rather than guess. Silence here is correct; a wrong guess reboots.
+        [ -n "$cur" ] || continue
+
+        id_file="$STATE_DIR/${name}.cid"
+        cnt_file="$STATE_DIR/${name}.oom_kill"
+        hist_file="$STATE_DIR/${name}.kill_times"
+
+        prev_id=""; [ -f "$id_file" ]  && prev_id=$(cat "$id_file")
+        prev="";    [ -f "$cnt_file" ] && prev=$(cat "$cnt_file")
+
+        if [ "$cid" != "$prev_id" ]; then
+            # New container (redeploy/restart): re-baseline, never a kill.
+            printf '%s' "$cid" > "$id_file"
+            printf '%s' "$cur" > "$cnt_file"
+            continue
+        fi
+
+        [ -n "$prev" ] || prev=$cur
+        delta=$((cur - prev))
+        printf '%s' "$cur" > "$cnt_file"
+        [ "$delta" -gt 0 ] || continue
+
+        now=$(date -u +%s)
+        touch "$hist_file"
+        awk -v now="$now" -v win="$WINDOW_SECS" '($0 + 0) >= now - win' "$hist_file" > "${hist_file}.tmp"
+        i=0
+        while [ "$i" -lt "$delta" ]; do echo "$now" >> "${hist_file}.tmp"; i=$((i + 1)); done
+        mv "${hist_file}.tmp" "$hist_file"
+        in_window=$(wc -l < "$hist_file" | tr -d ' ')
+
+        log "CRITICAL: $name OOM-killed by the cgroup limit (${delta} this check; ${in_window} in the last $((WINDOW_SECS / 60)) min)"
+        alert_lens "$name" "$delta" "$in_window"
+
+        if [ "$in_window" -ge "$REBOOT_THRESHOLD" ]; then
+            log "CRITICAL: $name hit ${in_window} real OOM kills within $((WINDOW_SECS / 60)) min — rebooting to break the loop"
+            rm -f "$hist_file"
+            systemctl reboot
+            exit 0
+        fi
+    done
+    sleep "$POLL_SECS"
+done

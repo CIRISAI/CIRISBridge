@@ -1,0 +1,128 @@
+#!/bin/sh
+# ciris-readapi-forensics.sh — capture WHY the read API is hung, before it is
+# restarted away.
+#
+# Invoked by ciris-readapi-watchdog.sh at the moment a hang is confirmed and
+# BEFORE the container is restarted. The restart is what makes this bug hard
+# to diagnose: it clears the evidence in ~2 minutes, so every occurrence so
+# far has been reasoned about from the outside. This writes a dated bundle to
+# /var/log/ciris/forensics/<ts>/ and then gets out of the way.
+#
+# Design constraints:
+#   - TIME-BOUNDED. Every occurrence is real read-API downtime, so capture is
+#     capped (~75 s) and the watchdog restarts immediately after. Availability
+#     wins over a longer trace.
+#   - NEVER FAILS THE CALLER. Any probe that errors is recorded as such and
+#     skipped; a forensics bug must not stop the restart that restores service.
+#   - Samples over time, not once. The distinguishing question is whether the
+#     accept queue and faults are MOVING (a live convoy) or FROZEN (a deadlock),
+#     and a single snapshot cannot answer that.
+#
+# Usage: ciris-readapi-forensics.sh <container> <port>
+
+set -u
+CONTAINER="${1:-ciris-server}"
+PORT="${2:-4243}"
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+OUT="/var/log/ciris/forensics/${TS}"
+mkdir -p "$OUT" 2>/dev/null || exit 0
+
+say() { printf '%s\n' "$*" >> "$OUT/00-summary.txt" 2>/dev/null; }
+run() { # run <file> <cmd...> — never propagates failure
+    _f="$1"; shift
+    { "$@"; } > "$OUT/$_f" 2>&1 || echo "(command failed: $*)" >> "$OUT/$_f"
+}
+
+PID=$(docker inspect "$CONTAINER" --format '{{ '{{' }}.State.Pid{{ '}}' }}' 2>/dev/null || echo "")
+
+say "read-API hang forensics"
+say "captured_at   : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+say "container     : $CONTAINER"
+say "pid           : ${PID:-<none>}"
+say "image         : $(docker inspect "$CONTAINER" --format '{{ '{{' }}.Config.Image{{ '}}' }}' 2>/dev/null)"
+say "started_at    : $(docker inspect "$CONTAINER" --format '{{ '{{' }}.State.StartedAt{{ '}}' }}' 2>/dev/null)"
+say "restart_count : $(docker inspect "$CONTAINER" --format '{{ '{{' }}.RestartCount{{ '}}' }}' 2>/dev/null)"
+say "issue         : CIRISServer#506"
+
+[ -n "$PID" ] || { say "NO PID — container not running; nothing to capture"; exit 0; }
+
+# ---------------------------------------------------------------- threads
+# The central question: is a thread in D (uninterruptible disk wait, the
+# original #506 signature), or are they all in S/futex (a lock convoy or a
+# deadlock)? wchan names WHERE. Sampled 3x so a transient is distinguishable
+# from a thread that is genuinely stuck in one place.
+for pass in 1 2 3; do
+    {
+        echo "=== thread sample $pass @ $(date -u +%H:%M:%S) ==="
+        printf '%-8s %-17s %-6s %-28s %s\n' TID COMM STATE WCHAN UTIME+STIME
+        for t in /proc/"$PID"/task/*; do
+            [ -d "$t" ] || continue
+            tid=$(basename "$t")
+            printf '%-8s %-17s %-6s %-28s %s\n' \
+                "$tid" \
+                "$(cat "$t/comm" 2>/dev/null)" \
+                "$(awk '{print $3}' "$t/stat" 2>/dev/null)" \
+                "$(cat "$t/wchan" 2>/dev/null || echo '-')" \
+                "$(awk '{print $14"+"$15}' "$t/stat" 2>/dev/null)"
+        done
+    } >> "$OUT/01-threads.txt" 2>&1
+    # Kernel stacks need CAP_SYS_ADMIN; absent is fine, note it.
+    {
+        echo "=== kernel stacks sample $pass ==="
+        for t in /proc/"$PID"/task/*; do
+            s=$(cat "$t/stack" 2>/dev/null) || continue
+            [ -n "$s" ] && { echo "--- $(basename "$t") $(cat "$t/comm" 2>/dev/null) ---"; echo "$s"; }
+        done
+    } >> "$OUT/02-stacks.txt" 2>&1
+    [ "$pass" -lt 3 ] && sleep 10
+done
+
+# ------------------------------------------------------- queue / io motion
+# Frozen counters => deadlock. Moving counters => the node is working and the
+# accept loop is simply never scheduled. That distinction is the whole ballgame.
+{
+    echo "t  accept_q  majflt/s  read_MB/s  ctxsw/s  probe"
+    prev_f=$(awk '{print $12}' /proc/"$PID"/stat 2>/dev/null || echo 0)
+    prev_r=$(awk '/^read_bytes/{print $2}' /proc/"$PID"/io 2>/dev/null || echo 0)
+    prev_c=$(awk '/^voluntary_ctxt_switches/{print $2}' /proc/"$PID"/status 2>/dev/null || echo 0)
+    for i in 1 2 3 4 5 6; do
+        sleep 5
+        q=$(nsenter -t "$PID" -n ss -tln 2>/dev/null \
+            | awk -v p=":$PORT\$" '$1 == "LISTEN" && $4 ~ p { print $2; exit }')
+        f=$(awk '{print $12}' /proc/"$PID"/stat 2>/dev/null || echo 0)
+        r=$(awk '/^read_bytes/{print $2}' /proc/"$PID"/io 2>/dev/null || echo 0)
+        c=$(awk '/^voluntary_ctxt_switches/{print $2}' /proc/"$PID"/status 2>/dev/null || echo 0)
+        code=$(curl -sS --max-time 4 -o /dev/null -w '%{http_code}' \
+                 "http://localhost:${PORT}/v1/identity" 2>/dev/null)
+        printf '%2ds %9s %9s %10s %8s  %s\n' $((i*5)) "${q:--}" \
+            $(( (f - prev_f) / 5 )) $(( (r - prev_r) / 5 / 1048576 )) \
+            $(( (c - prev_c) / 5 )) "${code:-000}"
+        prev_f=$f; prev_r=$r; prev_c=$c
+    done
+} > "$OUT/03-motion.txt" 2>&1
+
+# ------------------------------------------------------------- environment
+run 04-pressure.txt sh -c 'for f in io cpu memory; do echo "--- $f ---"; cat /proc/pressure/$f 2>/dev/null; done'
+run 05-memory.txt   sh -c 'free -m; echo; echo "--- container ---"; cat /sys/fs/cgroup/system.slice/docker-*.scope/memory.current 2>/dev/null | head -3; echo "--- meminfo ---"; grep -E "Dirty|Writeback|MemFree|Cached" /proc/meminfo'
+run 06-docker-stats.txt docker stats --no-stream
+run 07-sockets.txt  sh -c "nsenter -t $PID -n ss -tanp 2>/dev/null | head -40"
+run 08-fds.txt      sh -c "ls -l /proc/$PID/fd 2>/dev/null | awk '{print \$NF}' | sort | uniq -c | sort -rn | head -20"
+run 09-corpus.txt   sh -c 'du -sh /data/cirisserver/data /data/cirisstatus 2>/dev/null; find /data -name "*.db*" -size +10M -exec ls -lh {} \; 2>/dev/null | awk "{print \$5, \$9}"'
+run 10-diskstats.txt sh -c 'cat /proc/diskstats | grep -E " (vda|vda2) "; echo; uptime'
+run 11-logs.txt     docker logs "$CONTAINER" --tail 400
+run 12-peers.txt    sh -c "docker logs $CONTAINER --tail 3000 2>&1 | grep -ioE 'trusted_peers=[0-9]+|primed=[0-9]+|holdings[a-z_ ]*|round' | sort | uniq -c | sort -rn | head -15"
+
+# ------------------------------------------------------------- verdict hint
+D=$(for t in /proc/"$PID"/task/*; do awk '{print $3}' "$t/stat" 2>/dev/null; done | grep -c '^D$')
+say ""
+say "threads in D (uninterruptible IO): $D"
+if [ "$D" -gt 0 ]; then
+    say "=> matches the original #506 disk-wait signature"
+else
+    say "=> NO D-state thread: not classic disk wait. See 01-threads.txt for"
+    say "   whether workers sit in futex_wait_queue_me (lock convoy) and"
+    say "   03-motion.txt for whether counters are moving (live) or frozen."
+fi
+say ""
+say "files: $(ls "$OUT" | tr '\n' ' ')"
+exit 0
