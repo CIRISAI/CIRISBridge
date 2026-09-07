@@ -20,20 +20,23 @@ services:
         max-size: "50m"
         max-file: "3"
     mem_limit: 1536m
-    # EXPERIMENT (CIRISStatus#69): cap glibc malloc arenas.
+    # NO environment: block, deliberately — do not add one.
     #
-    # This node's heap is ~97% allocator free lists, not live data —
-    # /api/v1/debug/memory reports live_fraction 0.03: ~44 MB live against
-    # ~1.4 GB held. The held memory is fragmented across ~1800 chunks in
-    # several arenas, so keepcost stays at 3.1 MB and malloc_trim can return
-    # almost nothing. Capping arenas is the lever that actually applies:
-    # the same churn recycles through a smaller pool instead of each arena
-    # growing its own free lists.
+    # This node caps its own glibc malloc arenas from inside the binary as of
+    # v0.3.63, before it builds its runtime (CIRISStatus#69: -847 MB committed,
+    # live memory unchanged at ~44 MB). Earlier bridge deploys set
+    # MALLOC_ARENA_MAX=2 here while that fix was in flight; it has been REMOVED
+    # because the binary now owns the decision.
     #
-    # NOTE this is a libc tunable, NOT application config — the node's
-    # zero-env boot contract (no CIRIS_SERVER_* / STATUS_* vars) is intact.
-    environment:
-      MALLOC_ARENA_MAX: "2"
+    # Keeping it would put an env var back into a deployment whose contract is
+    # that it reads none (DEPLOY.md §2), leaving a future reader unable to tell
+    # whether it is load-bearing or leftover, and splitting one decision across
+    # two places that can drift. An explicit value here would still win — glibc
+    # reads it before the process runs — which is exactly why silence is safer.
+    #
+    # Verify which path ran from the boot log:
+    #   "capped glibc malloc arenas ..."                   <- correct (binary)
+    #   "MALLOC_ARENA_MAX set in the environment ..."      <- someone re-added it
     # Two CLI flags, no environment: block.
     command: ["--home", "{{ ciris_status_home }}", "--key-id", "{{ ciris_status_key_id }}"]
     volumes:
