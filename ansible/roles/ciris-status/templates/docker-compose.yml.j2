@@ -19,7 +19,17 @@ services:
       options:
         max-size: "50m"
         max-file: "3"
-    mem_limit: 1536m
+    # Sized from measurement, not history (CIRISStatus DEPLOY.md).
+    # 1536m was set against an UNCAPPED process holding ~1.46 GB committed, of
+    # which ~1.4 GB was allocator free list and 44 MB was live. With the cap the
+    # same work settles at: live 44.8 MB, RssAnon 572 MB, VmSwap 49 MB
+    # (committed 616 MB) over 49 samples / 144 min on v0.3.63, and the cgroup's
+    # memory.events "max" stayed 0 throughout — the limit was never the
+    # constraint. 896m is ~1.5x settled RssAnon and returns 640 MB to a 3.9 GB
+    # host that ciris-server needs. If memory.events "max" ever starts climbing,
+    # the limit is being enforced continuously and should go UP, not down —
+    # that state is what produced the original stalls.
+    mem_limit: 896m
     # NO environment: block, deliberately — do not add one.
     #
     # This node caps its own glibc malloc arenas from inside the binary as of

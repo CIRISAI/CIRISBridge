@@ -36,13 +36,17 @@ services:
       # request via the published port arrives from the docker bridge gateway
       # and is refused — read it with `docker exec`, not from the host.
       CIRIS_DIAGNOSTICS: "1"
-      # glibc arena cap — the same knob ciris-status runs with. On that node it
-      # cut committed 1458 -> 611 MB (-58%) with live memory unchanged at
-      # ~44 MB (CIRISStatus#69). Here it also makes the diagnostics readable:
-      # with <=1 thread heap, mallinfo2.arena is essentially the brk [heap], so
-      # fordblks-vs-uordblks reads as that heap's composition instead of being
-      # blurred across the 15 arenas glibc creates by default on 2 vCPU.
-      MALLOC_ARENA_MAX: "2"
+      # NOTE: MALLOC_ARENA_MAX is deliberately NOT set here.
+      #
+      # 0.5.200 calls diag::tune_allocator() -> mallopt(M_ARENA_MAX, 2) from the
+      # same serve entries as the diagnostics switch, so the binary owns the
+      # decision (CIRISServer#552/#553). An explicit env var would still WIN over
+      # the in-process call, which is exactly why it must not be set: it would
+      # silently override the node's own tuning from a second place that can
+      # drift, and a future reader could not tell whether it was load-bearing.
+      # ciris-status dropped it for the same reason (CIRISStatus DEPLOY.md).
+      #
+      # Verify from the boot log which path ran before assuming the cap is on.
     volumes:
       # Single persistent volume — adopted identities (sealed Ed25519 + ML-DSA-65
       # + RNS), SQLite corpus, Reticulum storage. Owned by uid 1000 on the host.
