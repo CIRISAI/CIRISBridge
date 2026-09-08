@@ -19,17 +19,29 @@ services:
       options:
         max-size: "50m"
         max-file: "3"
-    # Sized from measurement, not history (CIRISStatus DEPLOY.md).
-    # 1536m was set against an UNCAPPED process holding ~1.46 GB committed, of
-    # which ~1.4 GB was allocator free list and 44 MB was live. With the cap the
-    # same work settles at: live 44.8 MB, RssAnon 572 MB, VmSwap 49 MB
-    # (committed 616 MB) over 49 samples / 144 min on v0.3.63, and the cgroup's
-    # memory.events "max" stayed 0 throughout — the limit was never the
-    # constraint. 896m is ~1.5x settled RssAnon and returns 640 MB to a 3.9 GB
-    # host that ciris-server needs. If memory.events "max" ever starts climbing,
-    # the limit is being enforced continuously and should go UP, not down —
-    # that state is what produced the original stalls.
-    mem_limit: 896m
+    # Sized from measurement, and RAISED once the measurement said to.
+    #
+    # History: 1536m was set against an UNCAPPED process (~1.46 GB committed,
+    # ~1.4 GB of it allocator free list). With the arena cap the anon set settles
+    # near 570 MB, so on 2026-09-07 this was cut to 896m (~1.5x settled RssAnon)
+    # with the cgroup's memory.events "max" at 0.
+    #
+    # That was too tight, and the cgroup said so. On v0.3.68, 56 min uptime:
+    #   memory.current 769 MB / 896      max events 1241 -> 6821 in 43 min
+    #   anon 552.3 MB   file 214.8 MB (active_file 165.0)   pgsteal 337410
+    # Continuous enforcement, not a boot transient. It is CACHE reclaim rather
+    # than anon thrashing (swap only 40 MB), so it never risked an OOM kill —
+    # but this node reads its corpus constantly and repeatedly evicting those
+    # pages is exactly the first-load latency the status page complains about.
+    #
+    # 1216m = anon (~570) + room for the ~215 MB working file cache and headroom,
+    # still returning 320 MB against the original 1536m. Host has 2.1 GB
+    # available and limits are ceilings, not reservations.
+    #
+    # The rule, restated because it has now fired once: if memory.events "max"
+    # climbs at STEADY STATE (not just during boot), this limit goes UP. Boot
+    # alone will always generate some — judge it after ~30 min of uptime.
+    mem_limit: 1216m
     # NO environment: block, deliberately — do not add one.
     #
     # This node caps its own glibc malloc arenas from inside the binary as of
