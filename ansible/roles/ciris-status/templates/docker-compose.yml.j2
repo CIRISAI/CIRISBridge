@@ -60,6 +60,18 @@ services:
     #   "capped glibc malloc arenas ..."                   <- correct (binary)
     #   "MALLOC_ARENA_MAX set in the environment ..."      <- someone re-added it
     # Two CLI flags, no environment: block.
+    # NO --diagnostics here, deliberately.
+    #
+    # v0.3.71 mounts GET /api/v1/debug/memory behind a CLI flag (a flag, not an
+    # env var, so the zero-env contract survives). It is NOT loopback-bound on
+    # this node, and :4253 is 0.0.0.0/0 + ::/0 in the cloud firewall because
+    # remote agents post delegation claims to it. Caddy 404s the proxied
+    # /status/api/v1/debug/* path, but NOTHING covers host:4253 directly, so
+    # while the flag is on the endpoint is reachable from the open internet
+    # (CIRISStatus#73).
+    #
+    # Turn it on ONLY for a measurement, and take it off in the same session.
+    # The reading it was added for (CIRISStatus#69, 2026-09-09) is done.
     command: ["--home", "{{ ciris_status_home }}", "--key-id", "{{ ciris_status_key_id }}"]
     volumes:
       # This node's OWN corpus + identity volume — NEVER mount Node A's data/.
