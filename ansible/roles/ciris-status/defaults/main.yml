@@ -7,7 +7,7 @@
 # Runbook: ../../CIRISStatus/DEPLOY.md
 # Runbook: ../../CIRISServer/FSD/BRIDGE_UPGRADE_v0.5.0.md §9
 
-ciris_status_version: "v0.3.71"
+ciris_status_version: "v0.3.72"
 ciris_status_image: "ghcr.io/cirisai/cirisstatus:{{ ciris_status_version }}"
 
 # Host paths
