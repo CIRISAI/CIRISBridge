@@ -28,6 +28,21 @@ services:
 {% else %}
     networks:
       - ciris
+      # Also on the lens network so ciris-status can probe the proxy by docker
+      # DNS instead of its public hostname. The status node currently probes
+      # proxy1.{{ dns_soa }}, which is Cloudflare-proxied (proxied=True) and
+      # therefore hairpins out to the CF edge and back to THIS host: measured
+      # 136-1502 ms, a 10x spread, against 3.5 ms straight to the container.
+      # That variance alone flaps the status page between operational/degraded/
+      # outage while the proxy answers in single-digit ms (CIRISStatus issue).
+      # EU has no such problem only because proxy1.ciris-services-2.ai is
+      # grey-clouded, so its probe already reaches the service directly.
+      #
+      # This adds the ROUTE. It does not by itself change what the adapter
+      # probes — verified from the status container's live sockets, which show
+      # connections to 172.67.163.135:443 and 104.21.42.160:443 (CF edge), not
+      # to a docker name. Retargeting is upstream; this makes it possible.
+      - cirislens
 {% endif %}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -47,4 +62,7 @@ networks:
   ciris:
     external: true
     name: postgres_ciris
+  cirislens:
+    external: true
+    name: lens_cirislens
 {% endif %}
