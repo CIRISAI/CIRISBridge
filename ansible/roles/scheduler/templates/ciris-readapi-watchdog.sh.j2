@@ -51,6 +51,7 @@ mkdir -p "$STATE_DIR" "$(dirname "$LOG")"
 FORENSICS=/opt/ciris/scheduler/ciris-readapi-forensics.sh
 FAIL_FILE="$STATE_DIR/readapi.fails"
 LAST_FILE="$STATE_DIR/readapi.last_restart"
+RC_FILE="$STATE_DIR/readapi.restartcount"
 
 ts()  { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { printf "%s %s\n" "$(ts)" "$*" | tee -a "$LOG"; }
@@ -105,6 +106,33 @@ while true; do
     sleep "$POLL_SECS"
 
     up=$(uptime_secs) || continue
+
+    # CRASH LOOP — the gap this watchdog had until 2026-09-11.
+    #
+    # Everything below is gated on uptime >= GRACE_SECS, which is right for the
+    # #506 hang (it only appears after ~22 h) but means a container that dies
+    # and restarts every few seconds is NEVER judged: it never accumulates the
+    # grace period. The OOM watchdog does not cover it either — it keys on the
+    # cgroup oom_kill counter, and a crash loop exits 1, not by SIGKILL.
+    #
+    # Found the hard way: ciris-server 0.5.205 crash-looped 16 times on a boot
+    # RuntimeError (CIRISServer#586) and BOTH watchdogs stayed silent through
+    # ~7 minutes of the canonical being down. The ansible smoke probe caught it
+    # only because a human was running a deploy at the time.
+    #
+    # Report, do NOT restart: restarting a container that cannot boot just
+    # accelerates the loop. This is a "wake someone" signal, and the remedy is
+    # a version rollback, which is not a decision to automate.
+    rc=$(docker inspect "$CONTAINER" --format '{{ '{{' }}.RestartCount{{ '}}' }}' 2>/dev/null || echo 0)
+    prev_rc=0; [ -f "$RC_FILE" ] && prev_rc=$(cat "$RC_FILE")
+    echo "${rc:-0}" > "$RC_FILE"
+    if [ "$up" -lt 120 ] && [ "${rc:-0}" -gt "$prev_rc" ] && [ "${rc:-0}" -ge 3 ]; then
+        last_err=$(docker logs "$CONTAINER" --tail 40 2>&1 | grep -iE "error|panic|traceback|fatal" | tail -1 | cut -c1-160)
+        log "CRITICAL: ${CONTAINER} is CRASH LOOPING — RestartCount=${rc} (was ${prev_rc}), uptime only ${up}s. NOT restarting; a container that cannot boot is not helped by another restart. Last error: ${last_err}"
+        alert_lens "container crash looping — restart count ${rc}, uptime ${up}s" "CRITICAL" "0" "none_crash_loop"
+        continue
+    fi
+
     # Still inside the boot-prime window: bound but legitimately not accepting.
     if [ "$up" -lt "$GRACE_SECS" ]; then
         echo 0 > "$FAIL_FILE"
