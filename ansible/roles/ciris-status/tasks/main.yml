@@ -28,6 +28,49 @@
         state: absent
       when: ciris_status_fresh | default(false)
 
+    # Snapshot BEFORE upgrading. This role had no backup step until 2026-09-11
+    # while ciris-server has had one since the 0.5.x cutover — an asymmetry with
+    # no justification: ciris-status is a full fabric node with its own identity
+    # (ciris-status-1-dfql6hsqys) and its own corpus, and it applies the same
+    # persist migrations. v0.3.75 took this node's schema 137 -> 143, which no
+    # version pin can walk back.
+    #
+    # Prune first so a nearly-full disk cannot be tipped over by the snapshot
+    # itself — the failure mode that took the canonical out on 2026-08-28.
+    - name: Check whether prior CIRISStatus data exists (for backup decision)
+      ansible.builtin.stat:
+        path: "{{ ciris_status_data_dir }}/data"
+      register: existing_status_data
+
+    - name: Prune old CIRISStatus upgrade snapshots (keep {{ ciris_status_bak_retain }})
+      ansible.builtin.shell: |
+        set -o pipefail
+        for kind in data identity; do
+          ls -d {{ ciris_status_data_dir }}/${kind}.bak.* 2>/dev/null \
+            | sort | head -n -{{ ciris_status_bak_retain }} | xargs -r rm -rf
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      when: not (ciris_status_fresh | default(false))
+      changed_when: false
+
+    - name: Snapshot CIRISStatus data + identity to .bak before upgrade
+      ansible.builtin.shell: |
+        set -e
+        ts=$(date -u +%Y%m%dT%H%M%SZ)
+        cp -a {{ ciris_status_data_dir }}/data     {{ ciris_status_data_dir }}/data.bak.$ts
+        cp -a {{ ciris_status_data_dir }}/identity {{ ciris_status_data_dir }}/identity.bak.$ts
+        echo "$ts" > {{ ciris_status_data_dir }}/.last-upgrade-bak
+        for kind in data identity; do
+          ls -d {{ ciris_status_data_dir }}/${kind}.bak.* 2>/dev/null \
+            | sort | head -n -{{ ciris_status_bak_retain }} | xargs -r rm -rf
+        done
+      args:
+        executable: /bin/bash
+      when: existing_status_data.stat.exists and not (ciris_status_fresh | default(false))
+      changed_when: true
+
     - name: Create CIRISStatus build + data directories
       ansible.builtin.file:
         path: "{{ item.path }}"
