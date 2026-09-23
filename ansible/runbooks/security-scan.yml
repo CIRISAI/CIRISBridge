@@ -66,17 +66,32 @@
             echo ""
 
             # SSH status
-            echo "--- SSH SECURITY ---"
-            if grep -q "^PermitRootLogin no" /etc/ssh/sshd_config 2>/dev/null; then
-              echo "✓ Root login disabled"
+            echo "--- SSH SECURITY (effective config via sshd -T) ---"
+            # Read what sshd will ACTUALLY enforce, not one file. The hardening
+            # lives in sshd_config.d/00- and 01-ciris-hardening.conf; the main
+            # sshd_config still says "PermitRootLogin yes" and the cloud-init file
+            # 50-cloud-init.conf says "PasswordAuthentication yes", both
+            # overridden under first-match-wins (CLAUDE.md gotcha #7). Grepping
+            # the main file produced false "may be enabled" warnings.
+            EFF=$(sshd -T 2>/dev/null)
+            PRL=$(printf '%s\n' "$EFF" | awk '$1=="permitrootlogin"{print $2}')
+            PWA=$(printf '%s\n' "$EFF" | awk '$1=="passwordauthentication"{print $2}')
+            if [ -z "$EFF" ]; then
+              echo "⚠ WARNING: sshd -T failed — could not read effective SSH config"
             else
-              echo "⚠ WARNING: Root login may be enabled"
-            fi
-
-            if grep -q "^PasswordAuthentication no" /etc/ssh/sshd_config 2>/dev/null; then
-              echo "✓ Password authentication disabled"
-            else
-              echo "⚠ WARNING: Password authentication may be enabled"
+              # Root with keys only is the INTENDED posture (Ansible deploys as
+              # root). Only password-capable root login is a finding.
+              case "$PRL" in
+                no)                                echo "✓ Root login disabled" ;;
+                prohibit-password|without-password) echo "✓ Root login key-only ($PRL)" ;;
+                forced-commands-only)              echo "✓ Root login forced-commands-only" ;;
+                *)                                 echo "⚠ WARNING: Root login allows passwords (permitrootlogin $PRL)" ;;
+              esac
+              if [ "$PWA" = "no" ]; then
+                echo "✓ Password authentication disabled"
+              else
+                echo "⚠ WARNING: Password authentication enabled (passwordauthentication $PWA)"
+              fi
             fi
             echo ""
 
@@ -108,8 +123,10 @@
 
             # Failed SSH attempts (last 24h)
             echo "--- RECENT SSH FAILURES ---"
-            FAILED=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null || echo "0")
-            INVALID=$(grep -c "Invalid user" /var/log/auth.log 2>/dev/null || echo "0")
+            FAILED=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null)
+            FAILED=${FAILED:-0}
+            INVALID=$(grep -c "Invalid user" /var/log/auth.log 2>/dev/null)
+            INVALID=${INVALID:-0}
             echo "Failed password attempts: $FAILED"
             echo "Invalid user attempts: $INVALID"
             echo ""
@@ -117,7 +134,8 @@
             # Security updates available
             echo "--- SECURITY UPDATES ---"
             apt-get update -qq 2>/dev/null
-            SECURITY_UPDATES=$(apt-get upgrade -s 2>/dev/null | grep -c "^Inst.*security" || echo "0")
+            SECURITY_UPDATES=$(apt-get upgrade -s 2>/dev/null | grep -c "^Inst.*security")
+            SECURITY_UPDATES=${SECURITY_UPDATES:-0}
             if [ "$SECURITY_UPDATES" -gt 0 ]; then
               echo "⚠ WARNING: $SECURITY_UPDATES security updates available"
             else
@@ -151,84 +169,47 @@
       block:
         - name: "PORTS: Analyze listening ports"
           ansible.builtin.shell: |
+            # POSIX sh — the ansible shell module runs /bin/sh (dash). This block
+            # previously used bash arrays and process substitution and died at
+            # line 11 with 'Syntax error: "(" unexpected', which aborted the
+            # whole --tags full scan: PACKAGES, SSH and DOCKER never ran.
+            # (CLAUDE.md gotcha #10.)
             echo "=== {{ inventory_hostname | upper }} - PORT ANALYSIS ==="
             echo ""
 
-            # All listening ports with process info
-            echo "--- ALL LISTENING PORTS ---"
-            ss -tulnp | grep LISTEN
+            echo "--- ALL LISTENING SOCKETS ---"
+            ss -tulnp | grep -E "LISTEN|UNCONN"
             echo ""
 
-            # Check for unexpected ports
-            echo "--- PORT VALIDATION ---"
-            EXPECTED_PORTS=(22 53 80 443 5432 6379)
-            WARNINGS=""
-
-            while read -r port; do
-              if [ -z "$port" ]; then continue; fi
-
-              # Check if port is expected
-              is_expected=false
-              for expected in "${EXPECTED_PORTS[@]}"; do
-                if [ "$port" = "$expected" ]; then
-                  is_expected=true
-                  break
-                fi
+            # The exposure question is what listens on a ROUTABLE address.
+            # Loopback binds (127.x, ::1, systemd-resolved on 127.0.0.53) are
+            # not exposure and are excluded. Expected set measured 2026-09-23:
+            #   22 ssh | 68 dhcp client | 80/443 caddy | 5433 spock
+            #   8000 billing (bound public, firewalled) | 8210/8211 vault
+            #   4242/4243/4253 fabric + status nodes (US only)
+            # 53 (DNS) and 5432 (legacy postgres) are decommissioned and are
+            # deliberately NOT expected — if either reappears, that is a finding.
+            echo "--- ROUTABLE LISTENER VALIDATION ---"
+            EXPECTED=" 22 68 80 443 4242 4243 4253 5433 8000 8210 8211 "
+            UNEXPECTED=$(ss -tulnH | awk '{print $5}' \
+              | grep -vE '^(127\.|\[::1\]|::1:)' \
+              | sed 's/.*://' | sort -un \
+              | while read -r port; do
+                  case "$EXPECTED" in *" $port "*) ;; *) echo "$port" ;; esac
+                done)
+            if [ -n "$UNEXPECTED" ]; then
+              for port in $UNEXPECTED; do
+                PROC=$(ss -tulnpH | grep ":$port " | grep -oE 'users:\(\([^)]*\)\)' | head -1)
+                printf '%s\n' "⚠ WARNING: unexpected routable listener on port $port - ${PROC:-unknown}"
               done
-
-              if [ "$is_expected" = false ]; then
-                PROCESS=$(ss -tulnp | grep ":$port " | grep -oE 'users:\(\(.*\)\)' | head -1)
-                WARNINGS="${WARNINGS}⚠ WARNING: Unexpected port $port listening - $PROCESS\n"
-              fi
-            done < <(ss -tuln | grep LISTEN | awk '{print $5}' | sed 's/.*://' | sort -n | uniq)
-
-            if [ -n "$WARNINGS" ]; then
-              echo -e "$WARNINGS"
             else
-              echo "✓ All listening ports are expected"
+              echo "✓ All routable listeners are expected"
             fi
             echo ""
 
-            # Port grouping by service
-            echo "--- PORTS BY SERVICE ---"
-            echo "SSH (22):"
-            ss -tulnp | grep ":22 " || echo "  Not listening"
+            echo "--- LOOPBACK-ONLY LISTENERS (not exposed; informational) ---"
+            ss -tulnH | awk '{print $5}' | grep -E '^(127\.|\[::1\]|::1:)' | sort -u | sed 's/^/  /'
             echo ""
-            echo "DNS (53):"
-            ss -tulnp | grep ":53 " || echo "  Not listening"
-            echo ""
-            echo "HTTP (80):"
-            ss -tulnp | grep ":80 " || echo "  Not listening"
-            echo ""
-            echo "HTTPS (443):"
-            ss -tulnp | grep ":443 " || echo "  Not listening"
-            echo ""
-            echo "PostgreSQL (5432):"
-            ss -tulnp | grep ":5432 " || echo "  Not listening"
-            echo ""
-            echo "Redis (6379):"
-            ss -tulnp | grep ":6379 " || echo "  Not listening"
-            echo ""
-
-            # External accessibility check
-            echo "--- EXTERNAL ACCESSIBILITY ---"
-            echo "Checking which ports are accessible from outside..."
-            ss -tuln | grep LISTEN | grep -E "0.0.0.0|:::" | awk '{print $5}' | sed 's/.*://' | sort -u | while read port; do
-              case $port in
-                22|53|80|443)
-                  echo "✓ Port $port externally accessible (expected)"
-                  ;;
-                5432)
-                  echo "⚠ WARNING: PostgreSQL (5432) externally accessible - should be internal only"
-                  ;;
-                6379)
-                  echo "⚠ WARNING: Redis (6379) externally accessible - should be internal only"
-                  ;;
-                *)
-                  echo "⚠ WARNING: Port $port externally accessible (unexpected)"
-                  ;;
-              esac
-            done
           register: ports
           changed_when: false
 
@@ -258,8 +239,10 @@
             echo ""
 
             # Summary
-            SECURITY_COUNT=$(apt-get upgrade -s 2>/dev/null | grep -c "^Inst.*security" || echo "0")
-            TOTAL_COUNT=$(apt-get upgrade -s 2>/dev/null | grep -c "^Inst" || echo "0")
+            SECURITY_COUNT=$(apt-get upgrade -s 2>/dev/null | grep -c "^Inst.*security")
+            SECURITY_COUNT=${SECURITY_COUNT:-0}
+            TOTAL_COUNT=$(apt-get upgrade -s 2>/dev/null | grep -c "^Inst")
+            TOTAL_COUNT=${TOTAL_COUNT:-0}
             echo "--- UPDATE SUMMARY ---"
             echo "Security updates: $SECURITY_COUNT"
             echo "Total updates: $TOTAL_COUNT"
@@ -272,11 +255,11 @@
 
             # Check for outdated Docker images
             echo "--- DOCKER IMAGE STATUS ---"
-            for image in $(docker images --format "{{.Repository}}:{{.Tag}}" | grep -E "ciris|postgres|redis|caddy"); do
+            for image in $(docker images --format "{% raw %}{{.Repository}}{% endraw %}:{% raw %}{{.Tag}}{% endraw %}" | grep -E "ciris|postgres|redis|caddy"); do
               echo "Checking $image..."
               # Note: This only checks locally, not remote registry
             done
-            docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.CreatedAt}}" | grep -E "ciris|postgres|redis|caddy"
+            docker images --format "table {% raw %}{{.Repository}}{% endraw %}\t{% raw %}{{.Tag}}{% endraw %}\t{% raw %}{{.CreatedAt}}{% endraw %}" | grep -E "ciris|postgres|redis|caddy"
           register: packages
           changed_when: false
 
@@ -295,68 +278,55 @@
             echo "=== {{ inventory_hostname | upper }} - SSH SECURITY AUDIT ==="
             echo ""
 
-            SSH_CONFIG="/etc/ssh/sshd_config"
+            # Every check below reads the EFFECTIVE config (sshd -T), which
+            # resolves Include drop-ins and first-match-wins. Grepping
+            # /etc/ssh/sshd_config alone reads directives sshd never applies.
+            EFF=$(sshd -T 2>/dev/null)
+            eff() { printf '%s\n' "$EFF" | awk -v k="$1" '$1==k{$1=""; sub(/^ /,""); print; exit}'; }
             WARNINGS=""
+            if [ -z "$EFF" ]; then
+              echo "⚠ WARNING: sshd -T failed — cannot audit effective SSH config"
+              WARNINGS="${WARNINGS}sshd -T unavailable\n"
+            fi
 
-            # Check PermitRootLogin
             echo "--- ROOT LOGIN ---"
-            ROOT_LOGIN=$(grep "^PermitRootLogin" "$SSH_CONFIG" 2>/dev/null || echo "not set")
-            if echo "$ROOT_LOGIN" | grep -q "no"; then
-              echo "✓ Root login disabled"
-            else
-              echo "⚠ WARNING: Root login not explicitly disabled"
-              echo "  Current: $ROOT_LOGIN"
-              WARNINGS="${WARNINGS}Root login not disabled\n"
-            fi
+            PRL=$(eff permitrootlogin); echo "permitrootlogin $PRL"
+            case "$PRL" in
+              no|prohibit-password|without-password|forced-commands-only)
+                echo "✓ Root cannot log in with a password" ;;
+              *)
+                echo "⚠ WARNING: root login accepts passwords"
+                WARNINGS="${WARNINGS}Root login accepts passwords ($PRL)\n" ;;
+            esac
             echo ""
 
-            # Check PasswordAuthentication
-            echo "--- PASSWORD AUTHENTICATION ---"
-            PASS_AUTH=$(grep "^PasswordAuthentication" "$SSH_CONFIG" 2>/dev/null || echo "not set")
-            if echo "$PASS_AUTH" | grep -q "no"; then
-              echo "✓ Password authentication disabled"
-            else
-              echo "⚠ WARNING: Password authentication not explicitly disabled"
-              echo "  Current: $PASS_AUTH"
-              WARNINGS="${WARNINGS}Password authentication not disabled\n"
-            fi
+            echo "--- PASSWORD / KEYBOARD-INTERACTIVE ---"
+            PWA=$(eff passwordauthentication); KBD=$(eff kbdinteractiveauthentication)
+            echo "passwordauthentication $PWA"; echo "kbdinteractiveauthentication $KBD"
+            [ "$PWA" = "no" ] && echo "✓ Password authentication disabled" || {
+              echo "⚠ WARNING: Password authentication enabled"
+              WARNINGS="${WARNINGS}Password authentication enabled\n"; }
+            [ "$KBD" = "no" ] || {
+              echo "⚠ WARNING: Keyboard-interactive authentication enabled"
+              WARNINGS="${WARNINGS}Keyboard-interactive enabled\n"; }
             echo ""
 
-            # Check PubkeyAuthentication
             echo "--- PUBLIC KEY AUTHENTICATION ---"
-            PUBKEY_AUTH=$(grep "^PubkeyAuthentication" "$SSH_CONFIG" 2>/dev/null || echo "PubkeyAuthentication yes (default)")
-            echo "$PUBKEY_AUTH"
-            if echo "$PUBKEY_AUTH" | grep -q "no"; then
+            PKA=$(eff pubkeyauthentication); echo "pubkeyauthentication $PKA"
+            [ "$PKA" = "yes" ] && echo "✓ Public key authentication enabled" || {
               echo "⚠ WARNING: Public key authentication disabled"
-              WARNINGS="${WARNINGS}Public key authentication disabled\n"
-            else
-              echo "✓ Public key authentication enabled"
-            fi
+              WARNINGS="${WARNINGS}Public key authentication disabled\n"; }
+            echo ""
+            # (Protocol 1 was removed from OpenSSH in 7.6; sshd -T no longer
+            # reports a protocol key, so there is nothing to check.)
+
+            echo "--- CIPHERS AND KEX (effective) ---"
+            echo "ciphers: $(eff ciphers)"
+            echo "kexalgorithms: $(eff kexalgorithms)"
             echo ""
 
-            # Check SSH protocol version
-            echo "--- SSH PROTOCOL ---"
-            PROTOCOL=$(grep "^Protocol" "$SSH_CONFIG" 2>/dev/null || echo "Protocol 2 (default)")
-            echo "$PROTOCOL"
-            if echo "$PROTOCOL" | grep -q "1"; then
-              echo "⚠ WARNING: SSH Protocol 1 enabled (insecure)"
-              WARNINGS="${WARNINGS}SSH Protocol 1 enabled\n"
-            fi
-            echo ""
-
-            # Check permitted ciphers
-            echo "--- CIPHERS AND KEX ---"
-            CIPHERS=$(grep "^Ciphers" "$SSH_CONFIG" 2>/dev/null || echo "Using defaults")
-            echo "Ciphers: $CIPHERS"
-            KEX=$(grep "^KexAlgorithms" "$SSH_CONFIG" 2>/dev/null || echo "Using defaults")
-            echo "KexAlgorithms: $KEX"
-            echo ""
-
-            # Check MaxAuthTries
             echo "--- AUTHENTICATION ATTEMPTS ---"
-            MAX_AUTH=$(grep "^MaxAuthTries" "$SSH_CONFIG" 2>/dev/null || echo "MaxAuthTries 6 (default)")
-            echo "$MAX_AUTH"
-            MAX_NUM=$(echo "$MAX_AUTH" | grep -oE '[0-9]+')
+            MAX_NUM=$(eff maxauthtries); echo "maxauthtries ${MAX_NUM:-?}"
             if [ "${MAX_NUM:-6}" -gt 3 ]; then
               echo "ℹ INFO: Consider reducing MaxAuthTries to 3"
             fi
@@ -365,7 +335,8 @@
             # Check authorized_keys
             echo "--- AUTHORIZED KEYS ---"
             if [ -f /root/.ssh/authorized_keys ]; then
-              KEY_COUNT=$(grep -c "^ssh-" /root/.ssh/authorized_keys 2>/dev/null || echo "0")
+              KEY_COUNT=$(grep -c "^ssh-" /root/.ssh/authorized_keys 2>/dev/null)
+              KEY_COUNT=${KEY_COUNT:-0}
               echo "Root authorized keys: $KEY_COUNT"
               PERMS=$(stat -c "%a" /root/.ssh/authorized_keys)
               if [ "$PERMS" = "600" ]; then
@@ -383,7 +354,8 @@
             echo "--- USERS WITH SSH ACCESS ---"
             getent passwd | awk -F: '$3 >= 1000 {print $1}' | while read user; do
               if [ -f "/home/$user/.ssh/authorized_keys" ]; then
-                KEY_COUNT=$(grep -c "^ssh-" "/home/$user/.ssh/authorized_keys" 2>/dev/null || echo "0")
+                KEY_COUNT=$(grep -c "^ssh-" "/home/$user/.ssh/authorized_keys" 2>/dev/null)
+                KEY_COUNT=${KEY_COUNT:-0}
                 echo "$user: $KEY_COUNT authorized keys"
               fi
             done
@@ -409,7 +381,7 @@
               echo "✓ SSH configuration follows security best practices"
             else
               echo "⚠ WARNINGS FOUND:"
-              echo -e "$WARNINGS"
+              printf '%b' "$WARNINGS"
             fi
           register: ssh_audit
           changed_when: false
@@ -463,8 +435,8 @@
 
             # Check for privileged containers
             echo "--- PRIVILEGED CONTAINERS ---"
-            PRIVILEGED=$(docker ps --format "{{.Names}}" --filter "status=running" | while read container; do
-              if docker inspect "$container" --format '{{.HostConfig.Privileged}}' 2>/dev/null | grep -q "true"; then
+            PRIVILEGED=$(docker ps --format "{% raw %}{{.Names}}{% endraw %}" --filter "status=running" | while read container; do
+              if docker inspect "$container" --format '{% raw %}{{.HostConfig.Privileged}}{% endraw %}' 2>/dev/null | grep -q "true"; then
                 echo "$container"
               fi
             done)
@@ -480,9 +452,9 @@
 
             # Check container capabilities
             echo "--- CONTAINER CAPABILITIES ---"
-            docker ps --format "{{.Names}}" --filter "status=running" | while read container; do
+            docker ps --format "{% raw %}{{.Names}}{% endraw %}" --filter "status=running" | while read container; do
               echo "$container:"
-              CAPS=$(docker inspect "$container" --format '{{.HostConfig.CapAdd}}' 2>/dev/null)
+              CAPS=$(docker inspect "$container" --format '{% raw %}{{.HostConfig.CapAdd}}{% endraw %}' 2>/dev/null)
               if [ "$CAPS" = "[]" ] || [ "$CAPS" = "<no value>" ]; then
                 echo "  ✓ No additional capabilities"
               else
@@ -493,8 +465,8 @@
 
             # Check for containers running as root
             echo "--- CONTAINER USER ---"
-            docker ps --format "{{.Names}}" --filter "status=running" | while read container; do
-              USER=$(docker inspect "$container" --format '{{.Config.User}}' 2>/dev/null)
+            docker ps --format "{% raw %}{{.Names}}{% endraw %}" --filter "status=running" | while read container; do
+              USER=$(docker inspect "$container" --format '{% raw %}{{.Config.User}}{% endraw %}' 2>/dev/null)
               if [ -z "$USER" ]; then
                 echo "$container: ⚠ Running as root (no user specified)"
               else
@@ -505,8 +477,8 @@
 
             # Check host network mode
             echo "--- NETWORK MODE ---"
-            HOST_NET=$(docker ps --format "{{.Names}}" --filter "status=running" | while read container; do
-              if docker inspect "$container" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null | grep -q "host"; then
+            HOST_NET=$(docker ps --format "{% raw %}{{.Names}}{% endraw %}" --filter "status=running" | while read container; do
+              if docker inspect "$container" --format '{% raw %}{{.HostConfig.NetworkMode}}{% endraw %}' 2>/dev/null | grep -q "host"; then
                 echo "$container"
               fi
             done)
@@ -522,8 +494,8 @@
 
             # Check volume mounts
             echo "--- SENSITIVE VOLUME MOUNTS ---"
-            docker ps --format "{{.Names}}" --filter "status=running" | while read container; do
-              MOUNTS=$(docker inspect "$container" --format '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' 2>/dev/null)
+            docker ps --format "{% raw %}{{.Names}}{% endraw %}" --filter "status=running" | while read container; do
+              MOUNTS=$(docker inspect "$container" --format '{% raw %}{{range .Mounts}}{% endraw %}{% raw %}{{.Source}}{% endraw %}:{% raw %}{{.Destination}}{% endraw %} {% raw %}{{end}}{% endraw %}' 2>/dev/null)
               if echo "$MOUNTS" | grep -qE "/etc|/root|/var/run/docker.sock"; then
                 echo "$container:"
                 echo "  ⚠ WARNING: Sensitive mounts detected"
@@ -534,12 +506,12 @@
 
             # Docker version
             echo "--- DOCKER VERSION ---"
-            docker version --format '{{.Server.Version}}' 2>/dev/null || echo "Cannot determine version"
+            docker version --format '{% raw %}{{.Server.Version}}{% endraw %}' 2>/dev/null || echo "Cannot determine version"
             echo ""
 
             # Image security
             echo "--- IMAGE SOURCES ---"
-            docker images --format "{{.Repository}}" | sort -u | while read repo; do
+            docker images --format "{% raw %}{{.Repository}}{% endraw %}" | sort -u | while read repo; do
               if echo "$repo" | grep -qE "^(localhost|[0-9]+\.)"; then
                 echo "⚠ Local/private registry: $repo"
               elif echo "$repo" | grep -qE "ghcr.io|docker.io"; then
@@ -556,7 +528,7 @@
               echo "✓ Docker configuration follows security best practices"
             else
               echo "⚠ WARNINGS FOUND:"
-              echo -e "$WARNINGS"
+              printf '%b' "$WARNINGS"
             fi
           register: docker_audit
           changed_when: false

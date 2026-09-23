@@ -22,8 +22,14 @@
   hosts: localhost
   gather_facts: false
   vars:
-    vultr_api_key: "{{ lookup('file', '~/.ciris_bridge_keys/vultr_api_key') | default(lookup('file', '~/Desktop/ciris_transfer/.ciris_bridge_keys/vultr_api_key')) }}"
-    hetzner_api_token: "{{ lookup('file', '~/.ciris_bridge_keys/hetzner_api_token') | default(lookup('file', '~/Desktop/ciris_transfer/.ciris_bridge_keys/hetzner_api_token')) }}"
+    # Key lookup: first_found picks whichever path exists, THEN reads it.
+    # The previous form, lookup('file', A) | default(lookup('file', B)),
+    # could never fall back: a file lookup on a missing path RAISES, and
+    # default() only handles undefined values, not exceptions. With A absent
+    # the play aborted before B was tried, so this runbook never reached the
+    # provider APIs at all. first_found still fails loudly if neither exists.
+    vultr_api_key: "{{ lookup('file', lookup('first_found', [lookup('env','HOME') ~ '/.ciris_bridge_keys/vultr_api_key', lookup('env','HOME') ~ '/Desktop/ciris_transfer/.ciris_bridge_keys/vultr_api_key'])) }}"
+    hetzner_api_token: "{{ lookup('file', lookup('first_found', [lookup('env','HOME') ~ '/.ciris_bridge_keys/hetzner_api_token', lookup('env','HOME') ~ '/Desktop/ciris_transfer/.ciris_bridge_keys/hetzner_api_token'])) }}"
     # Known CIRIS infrastructure
     known_vultr_instances:
       - "cirisbridge-us"
@@ -188,6 +194,10 @@
           register: vultr_firewalls
           failed_when: false
 
+        # The Vultr v2 firewall-group object no longer carries rule_count or
+        # instance_count (it returns id, description, date_created,
+        # date_modified). Referencing them raised an undefined-attribute error
+        # that aborted the play — a second bug hidden behind the key lookup.
         - name: "VULTR: Display firewall groups"
           ansible.builtin.debug:
             msg: |
@@ -198,8 +208,8 @@
                 ID: {{ fw.id }}
                 Created: {{ fw.date_created }}
                 Modified: {{ fw.date_modified }}
-                Rules: {{ fw.rule_count }}
-                Instances: {{ fw.instance_count }}
+                Rules: {{ fw.rule_count | default('n/a') }}
+                Instances: {{ fw.instance_count | default('n/a') }}
               {% endfor %}
           when: vultr_firewalls.status == 200
 
@@ -230,7 +240,7 @@
                 IP: {{ server.public_net.ipv4.ip }}
                 Status: {{ server.status }}
                 Type: {{ server.server_type.name }} ({{ server.server_type.cores }} cores, {{ server.server_type.memory }}GB RAM)
-                Location: {{ server.datacenter.location.city }}, {{ server.datacenter.location.country }}
+                Location: {{ (server.location.city | default(server.datacenter.location.city | default('n/a'))) }}, {{ (server.location.country | default(server.datacenter.location.country | default('n/a'))) }}
                 Created: {{ server.created }}
                 Labels: {{ server.labels | default({}) }}
                 Traffic: IN {{ (server.ingoing_traffic / 1024 / 1024 / 1024) | round(2) }}GB / OUT {{ (server.outgoing_traffic / 1024 / 1024 / 1024) | round(2) }}GB
