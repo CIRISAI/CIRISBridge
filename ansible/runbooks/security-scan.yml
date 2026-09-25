@@ -60,8 +60,13 @@
             echo ""
 
             # Listening ports
-            echo "--- LISTENING PORTS ---"
-            ss -tuln | grep LISTEN | awk '{print $5}' | sed 's/.*://' | sort -n | uniq | tr '\n' ' '
+            echo "--- LISTENING PORTS (non-loopback TCP) ---"
+            # Loopback binds (systemd-resolved on 127.0.0.53%lo, docker-proxy
+            # helpers) are not reachable from outside and used to show up here
+            # as a false port 53 on EU after Constellation was retired.
+            ss -Htln | awk '{print $4}' \
+              | grep -vE '^(127\.|\[::1\]|\[::ffff:127\.)|%lo:' \
+              | sed 's/.*://' | sort -n | uniq | tr '\n' ' '
             echo ""
             echo ""
 
