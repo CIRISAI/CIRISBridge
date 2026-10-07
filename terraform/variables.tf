@@ -52,13 +52,19 @@ variable "vultr_region" {
 variable "vultr_plan" {
   description = "Vultr plan ID"
   type        = string
-  default     = "vc2-2c-4gb"  # 2 vCPU, 4GB RAM, 80GB SSD - ~$24/mo
+  default     = "vc2-4c-8gb"  # 4 vCPU, 8GB RAM, 160GB SSD - $40/mo
 
+  # Resized from vc2-2c-4gb on 2026-10-07: the US node hosts the canonical
+  # (ciris-server + ciris-status) next to billing/proxy/vault and was out of
+  # both RAM (swap in use, ciris-server near its 2 GiB cap) and CPU (load ~2.8
+  # on 2 cores). Vultr plans only resize UP — never set this back to a
+  # smaller plan; terraform cannot shrink the instance in place.
+  #
   # Options:
   # - vc2-1c-1gb: 1 vCPU, 1GB RAM - ~$6/mo (minimal)
   # - vc2-1c-2gb: 1 vCPU, 2GB RAM - ~$12/mo
-  # - vc2-2c-4gb: 2 vCPU, 4GB RAM - ~$24/mo (recommended)
-  # - vc2-4c-8gb: 4 vCPU, 8GB RAM - ~$48/mo
+  # - vc2-2c-4gb: 2 vCPU, 4GB RAM - ~$20/mo
+  # - vc2-4c-8gb: 4 vCPU, 8GB RAM - $40/mo (current)
 }
 
 # =============================================================================
