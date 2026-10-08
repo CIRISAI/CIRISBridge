@@ -4,7 +4,7 @@
 # Wheel: pip install ciris-server==<version> on python:3.12-slim.
 # Runbook: ../CIRISServer/FSD/LENS_TO_SERVER_MIGRATION.md
 
-ciris_server_version: "0.5.223"
+ciris_server_version: "0.5.224"
 ciris_server_image_tag: "ciris-server:{{ ciris_server_version }}"
 
 # Host paths
