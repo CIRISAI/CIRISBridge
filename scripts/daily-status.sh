@@ -35,7 +35,7 @@ echo
 # 1. Surface scan (probes + TLS + internal)
 # ─────────────────────────────────────────────────────────────
 SNAPSHOT=/tmp/bridge-daily-$(date -u +%Y%m%d-%H%M).json
-timeout 30 python3 scripts/surface-scan.py --internal --out "$SNAPSHOT" --quiet 2>/dev/null || true
+timeout 120 python3 scripts/surface-scan.py --internal --out "$SNAPSHOT" --quiet 2>/dev/null || true
 
 python3 - "$SNAPSHOT" <<'PY'
 import json, sys
