@@ -223,6 +223,60 @@
       retries: 3
       delay: 3
 
+    # The canonical must be ANNOUNCED: its owner-binding at cohort_scope
+    # `federation`, not `self`. Unannounced, edge (#682) withholds its KEX
+    # occurrence and signed route from every fresh node, so key exchange never
+    # completes (CIRISServer#788). The field ships in 0.5.230 (CIRISServer#789);
+    # before that its absence is UNKNOWN, never a pass.
+    #   announced     — good
+    #   unowned       — seated but unowned (the canonical is owned, so wrong here)
+    #   NOT_ANNOUNCED — owned, unannounced, owner's pen absent (the #788 condition)
+    #   check_failed  — the node could not evaluate it
+    - name: Announce probe — /health node.canonical_announce
+      ansible.builtin.uri:
+        url: "http://localhost:{{ ciris_server_read_port }}/health"
+        return_content: true
+      register: ciris_server_health
+      retries: 3
+      delay: 3
+
+    - name: Read canonical_announce
+      ansible.builtin.set_fact:
+        ciris_server_announce: "{{ ((ciris_server_health.content | from_json).node | default({})).canonical_announce | default('ABSENT') }}"
+
+    - name: FAIL — canonical is not announced
+      ansible.builtin.fail:
+        msg: |
+          ciris-server {{ ciris_server_version }}: /health node.canonical_announce = "{{ ciris_server_announce }}" (want "announced").
+
+          {% if ciris_server_announce == 'NOT_ANNOUNCED' %}
+          The canonical is owned but its owner-binding was never announced, so fresh
+          nodes can never complete key exchange with it (CIRISServer#788). Fix: one boot
+          with the owner's pen present under {{ ciris_server_home }}/identity/{user,keys}
+          (the 2026-09-25 owner-record heal procedure), then verify
+          "boot: seated canonical was NOT announced — announced now", shred the pen
+          files and restart. Needs Eric's hardware-custodied key; the bridge cannot sign as owner.
+          {% elif ciris_server_announce == 'unowned' %}
+          The canonical reports itself seated but UNOWNED. It should be owned; check
+          the ownership state before anything else.
+          {% elif ciris_server_announce == 'ABSENT' %}
+          The field is missing on a release that should carry it (>= 0.5.230). Treat
+          the announce state as unknown and check the release.
+          {% else %}
+          The node could not evaluate its announce state; read docker logs ciris-server.
+          {% endif %}
+      when: >-
+        ciris_server_announce != 'announced' and
+        (ciris_server_announce != 'ABSENT' or ciris_server_version is version('0.5.230', '>='))
+
+    - name: WARN — announce state UNKNOWN on this release (field ships in 0.5.230)
+      ansible.builtin.debug:
+        msg: >-
+          UNKNOWN, not a pass: ciris-server {{ ciris_server_version }} predates
+          node.canonical_announce (CIRISServer#789, 0.5.230), so this deploy cannot
+          tell whether the canonical is announced (CIRISServer#788).
+      when: ciris_server_announce == 'ABSENT'
+
     # Surface ownership-claim banner if this is an unclaimed/fresh boot.
     # The PIN is one-shot console/log only — never served over HTTP (runbook §7).
     - name: Capture OWNERSHIP UNCLAIMED banner + NodeCode + PIN (if present)
@@ -241,6 +295,7 @@
           identity_hash = {{ (ciris_server_identity.content | from_json).identity_hash | default('?') }}
           pqc_key_id    = {{ (ciris_server_identity.content | from_json).pqc_key_id | default('?') }}
           (compare key_id to the prior 0.4.x value — byte-identical = no re-key)
+          canonical_announce = {{ ciris_server_announce }}{{ ' (UNKNOWN before 0.5.230)' if ciris_server_announce == 'ABSENT' else '' }}
 
           {% if ownership_banner.stdout | length > 0 %}
           Ownership banner (founder claim — NodeCode + PIN are one-shot, console only):
