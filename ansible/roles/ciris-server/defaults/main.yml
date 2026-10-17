@@ -7,6 +7,12 @@
 ciris_server_version: "0.5.226"
 ciris_server_image_tag: "ciris-server:{{ ciris_server_version }}"
 
+# Log filter override. Empty = RUST_LOG unset, so the binary's own EnvFilter
+# default ("info") applies. Set only for a bounded diagnostic window, via -e on
+# the deploy, then redeploy without it, e.g. CIRISServer#788:
+#   -e ciris_server_rust_log=info,ciris_edge::replication=debug,...
+ciris_server_rust_log: ""
+
 # Host paths
 ciris_server_data_dir: /data/cirisserver
 ciris_server_build_dir: /opt/ciris/server

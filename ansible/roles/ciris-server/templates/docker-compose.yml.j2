@@ -36,6 +36,10 @@ services:
       # request via the published port arrives from the docker bridge gateway
       # and is refused — read it with `docker exec`, not from the host.
       CIRIS_DIAGNOSTICS: "1"
+{% if ciris_server_rust_log %}
+      # Bounded diagnostic window only (see ciris_server_rust_log in defaults).
+      RUST_LOG: "{{ ciris_server_rust_log }}"
+{% endif %}
       # NOTE: MALLOC_ARENA_MAX is deliberately NOT set here.
       #
       # 0.5.200 calls diag::tune_allocator() -> mallopt(M_ARENA_MAX, 2) from the
