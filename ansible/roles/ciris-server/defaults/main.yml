@@ -13,6 +13,16 @@ ciris_server_image_tag: "ciris-server:{{ ciris_server_version }}"
 #   -e ciris_server_rust_log=info,ciris_edge::replication=debug,...
 ciris_server_rust_log: ""
 
+# One-off install of a local wheel instead of PyPI (e.g. an untagged CI build
+# for a coordinated cutover). Empty = the normal PyPI pin above. Pass all three
+# with -e, never commit them; the next deploy without them returns to PyPI:
+#   -e ciris_server_version=0.5.232
+#   -e ciris_server_wheel=/abs/path/ciris_server-0.5.232-...-manylinux_2_39_x86_64.whl
+#   -e ciris_server_wheel_sha256=<64 hex>
+# The sha256 is checked on the controller and again on the host after copy.
+ciris_server_wheel: ""
+ciris_server_wheel_sha256: ""
+
 # Host paths
 ciris_server_data_dir: /data/cirisserver
 ciris_server_build_dir: /opt/ciris/server

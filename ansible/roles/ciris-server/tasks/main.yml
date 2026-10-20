@@ -114,6 +114,67 @@
     # the retired CIRISLens keyring) are gone — the wheel mints its own hybrid
     # identity under --key-id ciris-canonical-1 on a wiped home.
 
+    # One-off local wheel instead of PyPI (ciris_server_wheel in defaults).
+    - name: Local wheel — check name, version and sha256 on the controller
+      when: ciris_server_wheel | length > 0
+      block:
+        - name: Local wheel — stat on the controller
+          ansible.builtin.stat:
+            path: "{{ ciris_server_wheel }}"
+            get_checksum: true
+            checksum_algorithm: sha256
+          delegate_to: localhost
+          become: false
+          register: ciris_server_wheel_stat
+
+        - name: FAIL — local wheel missing, misnamed or sha256 mismatch
+          ansible.builtin.assert:
+            that:
+              - ciris_server_wheel_stat.stat.exists
+              - (ciris_server_wheel | basename) is match('ciris_server-' ~ (ciris_server_version | regex_escape) ~ '-.*\.whl$')
+              - ciris_server_wheel_sha256 | length == 64
+              - ciris_server_wheel_stat.stat.checksum == (ciris_server_wheel_sha256 | lower)
+            fail_msg: >-
+              {{ ciris_server_wheel }}: exists={{ ciris_server_wheel_stat.stat.exists }},
+              must be named ciris_server-{{ ciris_server_version }}-*.whl (pass -e ciris_server_version
+              to match the wheel), sha256 {{ ciris_server_wheel_stat.stat.checksum | default('?') }}
+              vs expected {{ ciris_server_wheel_sha256 or '(none given)' }}.
+
+        - name: Local wheel — copy into the build context
+          ansible.builtin.copy:
+            src: "{{ ciris_server_wheel }}"
+            dest: "{{ ciris_server_build_dir }}/{{ ciris_server_wheel | basename }}"
+            mode: "0644"
+
+        - name: Local wheel — sha256 on the host after copy
+          ansible.builtin.stat:
+            path: "{{ ciris_server_build_dir }}/{{ ciris_server_wheel | basename }}"
+            get_checksum: true
+            checksum_algorithm: sha256
+          register: ciris_server_wheel_remote
+
+        - name: FAIL — wheel changed in transit
+          ansible.builtin.assert:
+            that: ciris_server_wheel_remote.stat.checksum == (ciris_server_wheel_sha256 | lower)
+            fail_msg: "host copy sha256 {{ ciris_server_wheel_remote.stat.checksum }} != {{ ciris_server_wheel_sha256 }}"
+
+    # A wheel left from a one-off install must not linger in the build context
+    # once deploys return to PyPI.
+    - name: Find leftover local wheels in the build context
+      ansible.builtin.find:
+        paths: "{{ ciris_server_build_dir }}"
+        patterns: "*.whl"
+      register: ciris_server_stale_wheels
+
+    - name: Remove leftover local wheels
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ ciris_server_stale_wheels.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      when: (item.path | basename) != (ciris_server_wheel | basename)
+
     - name: Template Dockerfile (ciris-server wheel install + CLI flags)
       ansible.builtin.template:
         src: Dockerfile.j2
