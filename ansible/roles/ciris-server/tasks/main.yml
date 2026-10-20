@@ -55,8 +55,21 @@
       ansible.builtin.shell: |
         set -e
         ts=$(date -u +%Y%m%dT%H%M%SZ)
-        cp -a {{ ciris_server_data_dir }}/data     {{ ciris_server_data_dir }}/data.bak.$ts
+        bak={{ ciris_server_data_dir }}/data.bak.$ts
+        cp -a {{ ciris_server_data_dir }}/data     $bak
         cp -a {{ ciris_server_data_dir }}/identity {{ ciris_server_data_dir }}/identity.bak.$ts
+        # The node is still writing while this runs, so a file copy of a WAL
+        # database can be torn. Replace each copied .db with the SQLite online
+        # backup (a consistent snapshot) and check it: a one-way upgrade has no
+        # way back except this snapshot.
+        for db in {{ ciris_server_data_dir }}/data/*.db; do
+          [ -e "$db" ] || continue
+          n=$(basename "$db")
+          rm -f "$bak/$n" "$bak/$n-wal" "$bak/$n-shm"
+          sqlite3 "$db" ".timeout 30000" ".backup '$bak/$n'"
+          [ "$(sqlite3 "$bak/$n" 'PRAGMA quick_check;')" = "ok" ] || { echo "snapshot $bak/$n failed quick_check" >&2; exit 1; }
+          chown --reference="$db" "$bak/$n"
+        done
         echo "$ts" > {{ ciris_server_data_dir }}/.last-upgrade-bak
         # Re-prune so the retention count includes the snapshot just taken.
         for kind in data identity; do
