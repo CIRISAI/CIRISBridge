@@ -19,6 +19,29 @@
 - name: Deploy CIRISServer
   when: is_ciris_server_node
   block:
+    # Without a local wheel the build pip-installs ciris_server_version from
+    # PyPI. If that version was never published (an untagged one-off such as
+    # 0.5.232), stop here, before the snapshot or any restart — never fall back
+    # to an older PyPI release on top of a newer schema.
+    - name: Check the version is on PyPI (no local wheel given)
+      ansible.builtin.uri:
+        url: "https://pypi.org/pypi/ciris-server/{{ ciris_server_version }}/json"
+        status_code: [200, 404]
+      delegate_to: localhost
+      become: false
+      register: ciris_server_pypi
+      when: ciris_server_wheel | length == 0
+
+    - name: FAIL — version not on PyPI and no local wheel
+      ansible.builtin.fail:
+        msg: >-
+          ciris-server {{ ciris_server_version }} is not on PyPI. It was installed from a
+          local wheel; redeploy with the same -e ciris_server_wheel / ciris_server_wheel_sha256
+          flags, or wait for the tagged release and bump ciris_server_version to it.
+      when:
+        - ciris_server_wheel | length == 0
+        - ciris_server_pypi.status == 404
+
     # Backup existing data + identity before any upgrade (runbook §2 "do NOT skip").
     # No-op on first deploy (no source). Idempotent: backups carry their own bak suffix
     # and won't overwrite each other beyond the most recent.
