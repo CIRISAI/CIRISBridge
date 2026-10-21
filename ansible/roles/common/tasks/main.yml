@@ -22,6 +22,15 @@
       - unzip
     state: present
 
+# Trust-store updates are security fixes (e.g. the 2026-10 eMudhra
+# intermediate-key compromise), so keep this one package current rather than
+# merely present. Containers carry their own bundles and need image rebuilds.
+- name: Keep the CA trust store current
+  ansible.builtin.apt:
+    name: ca-certificates
+    state: latest
+    only_upgrade: true
+
 - name: Set timezone
   community.general.timezone:
     name: UTC
