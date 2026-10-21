@@ -1,5 +1,12 @@
 FROM python:3.12-slim
 
+# The CA bundle is a security dependency: native-tls clients in the process
+# (OAuth token exchange) trust it. The role pulls a fresh base before each
+# build; this also takes any newer Debian ca-certificates (2026-10 eMudhra:
+# deb13u1 drops emSign ECC Root CA - G3 and AAA Certificate Services).
+RUN apt-get update && apt-get install -y --no-install-recommends --only-upgrade ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
 # ciris-server is the abi3 PyO3 wheel: substrate + lens slice baked in,
 # no build deps required (manylinux bundles libtss2 + libcrypto via auditwheel).
 # Per ../../CIRISServer/FSD/LENS_TO_SERVER_MIGRATION.md §2 + §3.1.
