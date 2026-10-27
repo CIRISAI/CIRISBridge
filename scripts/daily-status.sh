@@ -155,24 +155,95 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────
-# 4. Error rate (last 30min, container logs)
+# 4. Errors (last 30min, container logs) — summarized, not just counted
+#    Lines are normalized into signatures and grouped. Known noise (scanner
+#    401s, expected un-routable dials) is reported but never drives the
+#    status; only the remaining "real" errors do, and the top ones are shown.
 # ─────────────────────────────────────────────────────────────
-SSH_EU="ssh -i $HOME/Desktop/ciris_transfer/.ciris_bridge_keys/cirisbridge_ed25519 -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 root@46.224.81.217"
+# Each remote emits "container<TAB>line". ciris-server is filtered by log
+# level (its WARN lines routinely contain the word "error"); the Python
+# services by keyword, as before.
+ERR_COLLECT='strip() { sed "s/\x1b\[[0-9;]*m//g"; }
+for c in $CONTAINERS; do
+  docker logs --since 30m $c 2>&1 | strip | grep -iE "error|exception|panic|fatal|aborted" | sed "s/^/$c	/"
+done
+docker logs --since 30m ciris-server 2>/dev/null | strip | grep -E "^[0-9TZ:.-]+ +ERROR |panicked" | sed "s/^/ciris-server	/"
+exit 0'
+US_ERR_LINES=$($SSH_US "CONTAINERS='ciris-billing ciris-proxy ciris-caddy ciris-billing-spock ciris-status'; $ERR_COLLECT" 2>/dev/null); US_ERR_RC=$?
+EU_ERR_LINES=$($SSH_EU "CONTAINERS='ciris-billing ciris-proxy ciris-caddy ciris-billing-spock'; $ERR_COLLECT" 2>/dev/null); EU_ERR_RC=$?
+[ $US_ERR_RC -ne 0 ] && US_ERR_LINES="__unreadable__"
+[ $EU_ERR_RC -ne 0 ] && EU_ERR_LINES="__unreadable__"
 
-US_ERRS=$($SSH_US 'for c in ciris-billing ciris-proxy ciris-caddy cirislens-api ciris-billing-spock; do
-  docker logs --since 30m $c 2>&1 | grep -ciE "error|exception|panic|fatal|aborted" | head -1
-done | awk "{s+=\$1} END{print s+0}"' 2>/dev/null)
-EU_ERRS=$($SSH_EU 'for c in ciris-billing ciris-proxy ciris-caddy ciris-billing-spock; do
-  docker logs --since 30m $c 2>&1 | grep -ciE "error|exception|panic|fatal|aborted" | head -1
-done | awk "{s+=\$1} END{print s+0}"' 2>/dev/null)
+ERR_SUMMARY=$(US="$US_ERR_LINES" EU="$EU_ERR_LINES" python3 - <<'PY'
+import os, re, collections
 
-if [ "${US_ERRS:-0}" -lt 5 ] && [ "${EU_ERRS:-0}" -lt 5 ]; then
-  pass "errors (30min): us=${US_ERRS:-?}  eu=${EU_ERRS:-?}"
-elif [ "${US_ERRS:-0}" -lt 100 ] && [ "${EU_ERRS:-0}" -lt 100 ]; then
-  warn "errors (30min): us=${US_ERRS:-?}  eu=${EU_ERRS:-?}  (drill: docker logs --since 30m <container> | grep -i error)"
-else
-  fail "errors (30min): us=${US_ERRS:-?}  eu=${EU_ERRS:-?}  (urgent)"
-fi
+# Known noise: (label, regex). Counted and shown, never escalated.
+KNOWN = [
+    ("auth rejected (LiteLLM, no/bad token)",
+     re.compile(r"Missing authorization token|Invalid proxy server token|"
+                r"user_api_key_auth\(\)|ProxyException: Authentication Error")),
+    ("un-routable dial (CIRISEdge#336)",
+     re.compile(r"un-routable dest|log_dedup: .*sample=(dial|link_request) target has no route")),
+]
+# Traceback frames repeat the error they belong to; drop them.
+FRAME = re.compile(r"^\s|^Traceback|^raise |^\.\.\.|^\)$")
+FATAL = re.compile(r"panicked|\bfatal\b|\bpanic\b", re.I)
+
+def signature(line):
+    s = re.sub(r"^\S*\d{4}-\d\d-\d\d[T ][\d:.,]+Z?\s*", "", line)
+    s = re.sub(r"^\d\d:\d\d:\d\d - ", "", s)                           # LiteLLM prefix
+    s = re.sub(r"[0-9a-f]{8}-[0-9a-f-]{27}", "<uuid>", s)
+    s = re.sub(r"\b\d{1,3}(\.\d{1,3}){3}(:\d+)?\b", "<ip>", s)
+    s = re.sub(r"\b[0-9a-f]{12,}\b|-(?=[a-z]*\d)[a-z0-9]{10}\b", "<id>", s)  # hashes, key_id fingerprints
+    s = re.sub(r"\d+", "N", s)
+    return s.strip()[:110]
+
+out = []
+worst = 0
+for node in ("us", "eu"):
+    raw = os.environ.get(node.upper(), "")
+    if raw == "__unreadable__":
+        out.append(("1", f"{node}: could not read container logs"))
+        worst = max(worst, 1)
+        continue
+    known = collections.Counter()
+    real = collections.Counter()
+    fatal = False
+    for row in raw.splitlines():
+        cont, _, line = row.partition("\t")
+        if not line or FRAME.search(line):
+            continue
+        label = next((l for l, rx in KNOWN if rx.search(line)), None)
+        if label:
+            known[label] += 1
+        else:
+            real[(cont, signature(line))] += 1
+            fatal |= bool(FATAL.search(line))
+    n = sum(real.values())
+    lvl = 2 if fatal or n >= 100 else 1 if n >= 5 else 0
+    worst = max(worst, lvl)
+    noise = ", ".join(f"{v} {k}" for k, v in known.most_common()) or "none"
+    out.append((str(lvl), f"{node}: {n} real; noise: {noise}"))
+    for (cont, sig), v in real.most_common(3):
+        out.append(("detail", f"{v:>5}  {cont}: {sig}"))
+    if len(real) > 3:
+        out.append(("detail", f"       … {len(real) - 3} more signature(s)"))
+
+print(worst)
+for lvl, text in out:
+    print(f"{lvl}\t{text}")
+PY
+)
+ERR_WORST=$(printf '%s\n' "$ERR_SUMMARY" | head -1)
+ERR_HEAD="errors (30min)"
+case "${ERR_WORST:-2}" in
+  0) pass "$ERR_HEAD";;
+  1) warn "$ERR_HEAD — drill: docker logs --since 30m <container>";;
+  *) fail "$ERR_HEAD — urgent";;
+esac
+printf '%s\n' "$ERR_SUMMARY" | tail -n +2 | while IFS=$'\t' read -r lvl text; do
+  if [ "$lvl" = "detail" ]; then printf "        %s\n" "$text"; else printf "      %s\n" "$text"; fi
+done
 
 # ─────────────────────────────────────────────────────────────
 # 5. PII inventory canary — does the schema match PII_INVENTORY.md §1?
