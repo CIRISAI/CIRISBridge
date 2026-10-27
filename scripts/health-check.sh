@@ -70,7 +70,7 @@ ERRORS=0
 if [[ -n "$VULTR_IP" ]]; then
     echo "Primary Region (Vultr - $VULTR_IP):"
     check_service "Billing" "https://billing1.$PRIMARY_DOMAIN/health" || ((ERRORS++))
-    check_service "Proxy" "https://proxy1.$PRIMARY_DOMAIN/health" || ((ERRORS++))
+    check_service "Proxy" "https://proxy1.$PRIMARY_DOMAIN/v1/status/simple" || ((ERRORS++))
     check_dns "DNS" "$VULTR_IP" "billing1.$PRIMARY_DOMAIN" || ((ERRORS++))
     echo ""
 else
@@ -82,7 +82,7 @@ fi
 if [[ -n "$HETZNER_IP" ]]; then
     echo "Secondary Region (Hetzner - $HETZNER_IP):"
     check_service "Billing" "https://billing1.$SECONDARY_DOMAIN/health" || ((ERRORS++))
-    check_service "Proxy" "https://proxy1.$SECONDARY_DOMAIN/health" || ((ERRORS++))
+    check_service "Proxy" "https://proxy1.$SECONDARY_DOMAIN/v1/status/simple" || ((ERRORS++))
     check_dns "DNS" "$HETZNER_IP" "billing1.$SECONDARY_DOMAIN" || ((ERRORS++))
     echo ""
 else

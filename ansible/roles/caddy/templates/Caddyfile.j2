@@ -12,6 +12,30 @@
     }
 }
 
+# LiteLLM serves its admin API, admin UI, SSO login and OpenAPI docs on the
+# same port as the client API. None of that is for external parties, so only
+# the routes CIRIS clients call reach it and everything else is a plain 404
+# (a 401 tells a scanner the admin route exists). Client set measured from
+# the proxy1 access logs, Aug–Oct 2026: agents (OpenAI SDK) use chat
+# completions and models; ciris-status uses /v1/status; /v1/status/simple and
+# /v1/web/search are CIRISProxy's own routes (server.py).
+(litellm_client_api) {
+{% if proxy_enabled | default(true) %}
+    @client_api path /v1/chat/completions /v1/models /v1/status /v1/status/simple /v1/web/search
+    handle @client_api {
+        reverse_proxy ciris-proxy:4000 {
+            health_uri /health/liveliness
+            health_interval 30s
+        }
+    }
+    handle {
+        respond 404
+    }
+{% else %}
+    respond "Service temporarily unavailable" 503
+{% endif %}
+}
+
 # Billing API
 billing1.{{ dns_soa }} {
     reverse_proxy host.docker.internal:8000 {
@@ -35,14 +59,7 @@ billing1.{{ dns_soa }} {
 # LLM Proxy (primary endpoint — llm01.* is the name agents use; proxy1.* is the canonical infra name)
 # EU omits llm01.{{ dns_soa }} — no DNS record for llm01.ciris-services-2.ai; EU legacy name is llm01.ciris-services-eu-1.com
 proxy1.{{ dns_soa }}{% if inventory_hostname == 'vultr' %}, llm01.{{ dns_soa }}{% endif %} {
-{% if proxy_enabled | default(true) %}
-    reverse_proxy ciris-proxy:4000 {
-        health_uri /health/liveliness
-        health_interval 30s
-    }
-{% else %}
-    respond "Service temporarily unavailable" 503
-{% endif %}
+    import litellm_client_api
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -60,14 +77,7 @@ proxy1.{{ dns_soa }}{% if inventory_hostname == 'vultr' %}, llm01.{{ dns_soa }}{
 {% if inventory_hostname == 'hetzner' %}
 # EU legacy proxy hostname (agents use llm01.ciris-services-eu-1.com as ciris_secondary)
 llm01.ciris-services-eu-1.com {
-{% if proxy_enabled | default(true) %}
-    reverse_proxy ciris-proxy:4000 {
-        health_uri /health/liveliness
-        health_interval 30s
-    }
-{% else %}
-    respond "Service temporarily unavailable" 503
-{% endif %}
+    import litellm_client_api
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -214,10 +224,7 @@ lens.{{ dns_soa }} {
 # Set caddy_failover_proxy_domains in inventory during an outage; clear on failback.
 {% for domain in caddy_failover_proxy_domains %}
 {{ domain }} {
-    reverse_proxy ciris-proxy:4000 {
-        health_uri /health/liveliness
-        health_interval 30s
-    }
+    import litellm_client_api
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -255,7 +262,7 @@ lens.{{ dns_soa }} {
 
 llm.ciris.ai {
     tls /opt/ciris/caddy/certs/llm.ciris.ai.fullchain.pem /opt/ciris/caddy/certs/llm.ciris.ai.privkey.pem
-    reverse_proxy ciris-proxy:4000
+    import litellm_client_api
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
