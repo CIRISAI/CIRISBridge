@@ -34,7 +34,10 @@ echo
 # ─────────────────────────────────────────────────────────────
 # 1. Surface scan (probes + TLS + internal)
 # ─────────────────────────────────────────────────────────────
-SNAPSHOT=/tmp/bridge-daily-$(date -u +%Y%m%d-%H%M).json
+# Snapshots and reports hold internal state; keep them in a private directory.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/cirisbridge"
+mkdir -p -m 700 "$STATE_DIR"
+SNAPSHOT="$STATE_DIR/bridge-daily-$(date -u +%Y%m%d-%H%M).json"
 timeout 120 python3 scripts/surface-scan.py --internal --out "$SNAPSHOT" --quiet 2>/dev/null || true
 
 python3 - "$SNAPSHOT" <<'PY'

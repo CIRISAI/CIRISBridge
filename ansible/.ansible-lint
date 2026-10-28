@@ -13,12 +13,18 @@ skip_list:
   - fqcn[action-core]  # builtin modules don't need FQCN
   - fqcn[action]  # community modules work without FQCN
   - fqcn[canonical]  # non-canonical names are fine
+  - role-name  # ciris-server, ciris-status and pgedge-postgres keep their hyphenated names
 
 # Warn but don't fail on these
 warn_list:
   - experimental
+  - command-instead-of-module  # test-env.yml uses curl for multi-step API checks
+  - no-handler
+  - name[template]
+  - jinja[spacing]  # Go-template braces escaped inside Jinja
 
-# Exclude problematic files
 exclude_paths:
   - .github/
-  - runbooks/remove-region.yml  # uses archive module
+  - inventory/production.yml  # Ansible Vault encrypted, not committed
+  - inventory/test.yml
+  - .ansible/

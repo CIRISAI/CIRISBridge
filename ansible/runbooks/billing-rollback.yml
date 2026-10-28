@@ -90,7 +90,7 @@
       ansible.builtin.uri:
         url: "http://localhost:8080/health"
         status_code: 200
-        return_content: yes
+        return_content: true
       register: smoke_health
       failed_when: smoke_health.json.status != 'healthy'
 

@@ -141,8 +141,8 @@
         group: "{{ item.group }}"
         mode: "{{ item.mode }}"
       loop:
-        - { path: "{{ ciris_server_build_dir }}",         owner: root, group: root, mode: "0755" }
-        - { path: "{{ ciris_server_data_dir }}",          owner: "1000", group: "1000", mode: "0755" }
+        - { path: "{{ ciris_server_build_dir }}", owner: root, group: root, mode: "0755" }
+        - { path: "{{ ciris_server_data_dir }}", owner: "1000", group: "1000", mode: "0755" }
         - { path: "{{ ciris_server_data_dir }}/identity", owner: "1000", group: "1000", mode: "0700" }
 
     # Per BRIDGE_SEED_MESH.md: this role is now a FRESH-MINT flow. The

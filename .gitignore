@@ -64,3 +64,6 @@ ansible/.ansible/
 tickets/
 ansible/inventory/test.yml
 ansible/inventory/test-dynamic.yml
+
+# ansible-lint collection cache
+ansible/.ansible/

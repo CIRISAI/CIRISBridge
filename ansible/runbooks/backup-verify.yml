@@ -3,27 +3,18 @@
 # Validates backup health, replication, and recovery capability against the
 # active billing path (ciris-billing-spock on port 5433, billing user).
 #
-# HISTORY:
-#   This runbook used to read native logical-replication state from the legacy
-#   ciris-postgres (port 5432, postgres user). After the Spock cutover (billing
-#   moved to pgEdge multi-master on 5433), the legacy publications/subscriptions
-#   went idle and their slots accumulated retained WAL nobody consumes. The
-#   runbook kept reading legacy state and reported false-alarm "replication
-#   broken" for ~3 weeks. As of 2026-05-01 it points at Spock.
-#
-# WHERE THINGS LIVE NOW:
+# WHERE THINGS LIVE:
 #   - ciris-billing connects to 127.0.0.1:5433 (Spock container)
 #   - Spock subscriptions: spock.sub_show_status()
 #   - Active replication slots: pg_replication_slots WHERE slot_name LIKE 'spk_%'
 #   - Replication-set membership: spock.tables
-#   - Legacy ciris-postgres on 5432 is orphaned (last write 2026-04-13)
 #
 # Usage:
 #   ansible-playbook -i inventory/production.yml runbooks/backup-verify.yml --tags status
 #   ansible-playbook -i inventory/production.yml runbooks/backup-verify.yml --tags test-dump
 #   ansible-playbook -i inventory/production.yml runbooks/backup-verify.yml --tags test-restore
 #   ansible-playbook -i inventory/production.yml runbooks/backup-verify.yml --tags wal-check
-#   ansible-playbook -i inventory/production.yml runbooks/backup-verify.yml --tags full-verify
+#   ansible-playbook -i inventory/production.yml runbooks/backup-verify.yml --tags full-verify   # all four steps
 #   ansible-playbook -i inventory/production.yml runbooks/backup-verify.yml --tags status --limit us
 
 - name: "POSTGRESQL BACKUP VERIFY (Spock) - Database Backup and Replication Health"
@@ -143,7 +134,7 @@
     # TEST-DUMP - Create test pg_dump and verify integrity
     # =========================================================================
     - name: "TEST-DUMP: Create and verify pg_dump backup (Spock)"
-      tags: [test-dump, never]
+      tags: [test-dump, full-verify, never]
       block:
         - name: "TEST-DUMP: Create backup file"
           ansible.builtin.shell: |
@@ -221,7 +212,7 @@
     # TEST-RESTORE - Restore to temporary database and verify
     # =========================================================================
     - name: "TEST-RESTORE: Restore backup to test database (Spock)"
-      tags: [test-restore, never]
+      tags: [test-restore, full-verify, never]
       block:
         - name: "TEST-RESTORE: Find latest backup and restore"
           ansible.builtin.shell: |
@@ -307,7 +298,7 @@
     # WAL-CHECK - Verify Spock replication health between nodes
     # =========================================================================
     - name: "WAL-CHECK: Verify Spock replication health"
-      tags: [wal-check, never]
+      tags: [wal-check, full-verify, never]
       block:
         - name: "WAL-CHECK: Check subscription status and slot retention"
           ansible.builtin.shell: |
@@ -420,43 +411,3 @@
         - name: "WAL-CHECK: Display results"
           ansible.builtin.debug:
             msg: "{{ wal_check.stdout }}"
-
-    # =========================================================================
-    # FULL-VERIFY - Run complete verification suite
-    # =========================================================================
-    - name: "FULL-VERIFY: Complete backup verification"
-      tags: [full-verify, never]
-      block:
-        - name: "FULL-VERIFY: Run all verification steps"
-          ansible.builtin.shell: |
-            echo "=== {{ inventory_hostname | upper }} - FULL SPOCK BACKUP VERIFICATION ==="
-            echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo ""
-            echo "Steps: status → test-dump → test-restore → wal-check"
-            echo ""
-          register: full_verify_header
-          changed_when: false
-
-        - name: "FULL-VERIFY: Display header"
-          ansible.builtin.debug:
-            msg: "{{ full_verify_header.stdout }}"
-
-        - name: Include status check
-          ansible.builtin.include_tasks: "{{ playbook_dir }}/runbooks/backup-verify.yml"
-          vars:
-            ansible_run_tags: [status]
-
-        - name: Include test dump
-          ansible.builtin.include_tasks: "{{ playbook_dir }}/runbooks/backup-verify.yml"
-          vars:
-            ansible_run_tags: [test-dump]
-
-        - name: Include test restore
-          ansible.builtin.include_tasks: "{{ playbook_dir }}/runbooks/backup-verify.yml"
-          vars:
-            ansible_run_tags: [test-restore]
-
-        - name: Include WAL check
-          ansible.builtin.include_tasks: "{{ playbook_dir }}/runbooks/backup-verify.yml"
-          vars:
-            ansible_run_tags: [wal-check]
