@@ -3,18 +3,6 @@
   ansible.builtin.systemd:
     daemon_reload: true
 
-- name: Restart heartbeat timer
-  ansible.builtin.systemd:
-    name: ciris-heartbeat.timer
-    state: restarted
-    daemon_reload: true
-
-- name: Enable heartbeat timer
-  ansible.builtin.systemd:
-    name: ciris-heartbeat.timer
-    enabled: true
-    state: started
-
 - name: Enable daily checks timer
   ansible.builtin.systemd:
     name: ciris-daily-checks.timer

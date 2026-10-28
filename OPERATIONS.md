@@ -117,11 +117,20 @@ Systemd timers on each node (`systemctl list-timers | grep ciris`):
 
 | Timer | Nodes | Schedule | Purpose |
 |-------|-------|----------|---------|
-| `ciris-heartbeat` | US, EU | every 20 min | Node liveness |
 | `ciris-daily-checks` | US, EU | 06:00 UTC | Certificates, replication, disk |
 | `ciris-spock-backup` | US, EU | 03:00 UTC | Billing database backup |
 | `ciris-weekly-security` | US, EU | Sun 04:00 UTC | Security posture scan |
 | `ciris-weekly-cleanup` | US, EU | Sat 03:00 UTC | Docker and log cleanup |
+
+On the US node, `ciris-oom-watchdog` and `ciris-readapi-watchdog` run as
+services: they record OOM kills and restart a hung canonical read API.
+
+Every job writes its results to the system journal:
+
+```bash
+journalctl -t ciris-scheduler --since today          # timer results
+journalctl -t ciris-oom-watchdog -t ciris-readapi-watchdog -p crit
+```
 
 ## Disk
 

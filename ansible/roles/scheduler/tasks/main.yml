@@ -1,6 +1,6 @@
 # CIRISBridge Scheduler Role
 # Deploys systemd timers for health checks and maintenance tasks
-# Sends heartbeats and results to CIRISLens
+# Job results go to the system journal under the ciris-scheduler tag
 ---
 - name: Create scheduler directory
   ansible.builtin.file:
@@ -13,15 +13,6 @@
 # ============================================================================
 # DEPLOY SCRIPTS
 # ============================================================================
-- name: Deploy heartbeat script
-  ansible.builtin.template:
-    src: ciris-heartbeat.sh.j2
-    dest: /opt/ciris/scheduler/ciris-heartbeat.sh
-    mode: "0750"
-    owner: root
-    group: root
-  notify: Restart heartbeat timer
-
 - name: Deploy daily checks script
   ansible.builtin.template:
     src: ciris-daily-checks.sh.j2
@@ -86,13 +77,6 @@
 # ============================================================================
 # DEPLOY SYSTEMD SERVICES
 # ============================================================================
-- name: Deploy heartbeat service
-  ansible.builtin.template:
-    src: ciris-heartbeat.service.j2
-    dest: /etc/systemd/system/ciris-heartbeat.service
-    mode: "0644"
-  notify: Reload systemd
-
 - name: Deploy daily checks service
   ansible.builtin.template:
     src: ciris-daily-checks.service.j2
@@ -161,15 +145,6 @@
 # ============================================================================
 # DEPLOY SYSTEMD TIMERS
 # ============================================================================
-- name: Deploy heartbeat timer
-  ansible.builtin.template:
-    src: ciris-heartbeat.timer.j2
-    dest: /etc/systemd/system/ciris-heartbeat.timer
-    mode: "0644"
-  notify:
-    - Reload systemd
-    - Enable heartbeat timer
-
 - name: Deploy daily checks timer
   ansible.builtin.template:
     src: ciris-daily-checks.timer.j2
@@ -216,7 +191,6 @@
     enabled: true
     daemon_reload: true
   loop:
-    - ciris-heartbeat.timer
     - ciris-daily-checks.timer
     - ciris-weekly-security.timer
     - ciris-weekly-cleanup.timer
@@ -244,31 +218,20 @@
     daemon_reload: true
   when: inventory_hostname == 'vultr'
 
-# ============================================================================
-# INITIAL HEARTBEAT TEST
-# ============================================================================
-- name: Run initial heartbeat test
-  ansible.builtin.command:
-    cmd: /opt/ciris/scheduler/ciris-heartbeat.sh
-  register: heartbeat_test
-  changed_when: false
-  failed_when: false
-
-- name: Display heartbeat test result
-  ansible.builtin.debug:
-    msg: "{{ heartbeat_test.stdout }}"
-  when: heartbeat_test.stdout | length > 0
-
-# The CIRISLens backup job has nothing left to back up; remove it from nodes
-# that still carry it.
-- name: Stop and disable the CIRISLens backup timer
+# Retired jobs: the CIRISLens backup (nothing left to back up) and the
+# heartbeat (it only posted liveness to the CIRISLens ingest endpoint). Remove
+# them from nodes that still carry them.
+- name: Stop and disable retired timers
   ansible.builtin.systemd:
-    name: ciris-lens-backup.timer
+    name: "{{ item }}"
     state: stopped
     enabled: false
+  loop:
+    - ciris-lens-backup.timer
+    - ciris-heartbeat.timer
   failed_when: false
 
-- name: Remove the CIRISLens backup units and script
+- name: Remove retired units and scripts
   ansible.builtin.file:
     path: "{{ item }}"
     state: absent
@@ -276,4 +239,7 @@
     - /etc/systemd/system/ciris-lens-backup.timer
     - /etc/systemd/system/ciris-lens-backup.service
     - /opt/ciris/scheduler/ciris-lens-backup.sh
+    - /etc/systemd/system/ciris-heartbeat.timer
+    - /etc/systemd/system/ciris-heartbeat.service
+    - /opt/ciris/scheduler/ciris-heartbeat.sh
   notify: Reload systemd

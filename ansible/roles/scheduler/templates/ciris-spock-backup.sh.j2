@@ -6,8 +6,6 @@
 
 set -euo pipefail
 
-LENS_ENDPOINT="{{ cirislens_endpoint }}/lens-api/api/v1/logs/ingest"
-SERVICE_TOKEN="{{ scheduler_service_token }}"
 NODE_NAME="{{ node_name }}"
 
 # Backup settings
@@ -20,27 +18,19 @@ DB_PORT="{{ pgedge_port | default('5433') }}"
 PSQL_CMD="/opt/pgedge/pg15/bin/psql"
 PGDUMP_CMD="/opt/pgedge/pg15/bin/pg_dump"
 
-log_to_lens() {
+log_event() {
   local level="$1"
   local message="$2"
   local event="$3"
   local metadata="$4"
+  local priority
 
-  curl -s -X POST "${LENS_ENDPOINT}" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${SERVICE_TOKEN}" \
-    -d "{
-      \"service_name\": \"ciris-scheduler\",
-      \"level\": \"${level}\",
-      \"message\": \"${message}\",
-      \"event\": \"${event}\",
-      \"node\": \"${NODE_NAME}\",
-      \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\",
-      \"metadata\": ${metadata}
-    }" \
-    --connect-timeout 5 \
-    --max-time 10 \
-    >/dev/null 2>&1 || true
+  case "${level}" in
+    ERROR) priority=err ;;
+    WARNING) priority=warning ;;
+    *) priority=info ;;
+  esac
+  logger -t ciris-scheduler -p "user.${priority}" "node=${NODE_NAME} event=${event} ${message} ${metadata}" || true
 }
 
 echo "=== Spock Billing Daily Backup - ${NODE_NAME} - $(date -u) ==="
@@ -54,7 +44,7 @@ echo "--- Pre-flight Checks ---"
 # Check if Spock container is running
 if ! docker ps --format '{% raw %}{{.Names}}{% endraw %}' | grep -q "^${CONTAINER_NAME}$"; then
   echo "INFO: Spock container not running on ${NODE_NAME} - skipping backup"
-  log_to_lens "INFO" "Spock backup skipped: container not running" "spock_backup_skipped" "{\"reason\": \"container_not_running\"}"
+  log_event "INFO" "Spock backup skipped: container not running" "spock_backup_skipped" "{\"reason\": \"container_not_running\"}"
   exit 0
 fi
 echo "Spock container: running"
@@ -67,7 +57,7 @@ echo "Backup directory: $BACKUP_DIR"
 DISK_FREE_KB=$(df "$BACKUP_DIR" | awk 'NR==2 {print $4}')
 if [ "$DISK_FREE_KB" -lt 524288 ]; then
   echo "ERROR: Insufficient disk space (< 500MB free)"
-  log_to_lens "ERROR" "Spock backup failed: insufficient disk space" "spock_backup_failed" "{\"reason\": \"low_disk_space\", \"free_kb\": ${DISK_FREE_KB}}"
+  log_event "ERROR" "Spock backup failed: insufficient disk space" "spock_backup_failed" "{\"reason\": \"low_disk_space\", \"free_kb\": ${DISK_FREE_KB}}"
   exit 1
 fi
 echo "Disk space: $(echo "$DISK_FREE_KB" | awk '{printf "%.1f GB", $1/1048576}') available"
@@ -75,7 +65,7 @@ echo "Disk space: $(echo "$DISK_FREE_KB" | awk '{printf "%.1f GB", $1/1048576}')
 # Verify database is accessible
 if ! docker exec "$CONTAINER_NAME" $PSQL_CMD -U "$DB_USER" -p "$DB_PORT" -d "$DB_NAME" -c "SELECT 1;" >/dev/null 2>&1; then
   echo "ERROR: Cannot connect to database"
-  log_to_lens "ERROR" "Spock backup failed: database connection failed" "spock_backup_failed" "{\"reason\": \"db_connection_failed\"}"
+  log_event "ERROR" "Spock backup failed: database connection failed" "spock_backup_failed" "{\"reason\": \"db_connection_failed\"}"
   exit 1
 fi
 echo "Database connection: OK"
@@ -134,7 +124,7 @@ if docker exec "$CONTAINER_NAME" $PGDUMP_CMD -U "$DB_USER" -p "$DB_PORT" -d "$DB
   else
     echo "ERROR: Backup file is corrupt"
     rm -f "$BACKUP_PATH"
-    log_to_lens "ERROR" "Spock backup failed: corrupt file" "spock_backup_failed" "{\"reason\": \"corrupt_backup\"}"
+    log_event "ERROR" "Spock backup failed: corrupt file" "spock_backup_failed" "{\"reason\": \"corrupt_backup\"}"
     exit 1
   fi
 
@@ -154,7 +144,7 @@ if docker exec "$CONTAINER_NAME" $PGDUMP_CMD -U "$DB_USER" -p "$DB_PORT" -d "$DB
 else
   echo "ERROR: Backup failed"
   rm -f "$BACKUP_PATH"
-  log_to_lens "ERROR" "Spock backup failed: pg_dump error" "spock_backup_failed" "{\"reason\": \"pg_dump_failed\"}"
+  log_event "ERROR" "Spock backup failed: pg_dump error" "spock_backup_failed" "{\"reason\": \"pg_dump_failed\"}"
   exit 1
 fi
 
@@ -191,7 +181,7 @@ echo "Duration: ${DURATION}s"
 echo "Retention: ${RETENTION_DAYS} days (${AFTER_COUNT} backups)"
 echo "Spock status: ${SPOCK_STATUS:-N/A}"
 
-log_to_lens "INFO" "Spock billing backup completed successfully" "spock_backup_complete" "{\"database\": \"${DB_NAME}\", \"db_size\": \"${DB_SIZE}\", \"backup_size\": \"${BACKUP_SIZE}\", \"duration_seconds\": ${DURATION}, \"backups_retained\": ${AFTER_COUNT}, \"spock_status\": \"${SPOCK_STATUS:-N/A}\"}"
+log_event "INFO" "Spock billing backup completed successfully" "spock_backup_complete" "{\"database\": \"${DB_NAME}\", \"db_size\": \"${DB_SIZE}\", \"backup_size\": \"${BACKUP_SIZE}\", \"duration_seconds\": ${DURATION}, \"backups_retained\": ${AFTER_COUNT}, \"spock_status\": \"${SPOCK_STATUS:-N/A}\"}"
 
 echo ""
 echo "=== Spock billing backup complete ==="
