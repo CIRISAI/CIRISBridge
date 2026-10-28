@@ -192,7 +192,7 @@ resource "vultr_instance" "us" {
   label             = "cirisbridge-us"
   hostname          = "cirisbridge-us"
   enable_ipv6       = true
-  backups           = "disabled"  # Manual backups to reduce cost
+  backups           = "disabled" # Manual backups to reduce cost
   ddos_protection   = false
   activation_email  = false
   ssh_key_ids       = [vultr_ssh_key.cirisbridge.id]
@@ -203,11 +203,11 @@ resource "vultr_instance" "us" {
 
 # Hetzner instance (EU - Active node)
 resource "hcloud_server" "eu" {
-  name        = "cirisbridge-eu"
-  server_type = var.hetzner_server_type
-  location    = var.hetzner_location
-  image       = "ubuntu-22.04"
-  ssh_keys    = [hcloud_ssh_key.cirisbridge.id]
+  name         = "cirisbridge-eu"
+  server_type  = var.hetzner_server_type
+  location     = var.hetzner_location
+  image        = "ubuntu-22.04"
+  ssh_keys     = [hcloud_ssh_key.cirisbridge.id]
   firewall_ids = [hcloud_firewall.cirisbridge.id]
 
   labels = {
@@ -219,10 +219,10 @@ resource "hcloud_server" "eu" {
 
 # Hetzner block storage for PostgreSQL
 resource "hcloud_volume" "postgres_eu" {
-  name      = "postgres-eu"
-  size      = var.hetzner_volume_size
-  location  = var.hetzner_location
-  format    = "ext4"
+  name     = "postgres-eu"
+  size     = var.hetzner_volume_size
+  location = var.hetzner_location
+  format   = "ext4"
 }
 
 resource "hcloud_volume_attachment" "postgres_eu" {
@@ -332,7 +332,7 @@ resource "vultr_firewall_rule" "test_postgres_vpc" {
 # Test Instance 1: Infrastructure (PostgreSQL + CIRISLens)
 resource "vultr_instance" "test_infra" {
   count             = var.create_test_env ? 1 : 0
-  plan              = "vc2-1c-2gb"  # 1 vCPU, 2GB RAM ~$12/mo
+  plan              = "vc2-1c-2gb" # 1 vCPU, 2GB RAM ~$12/mo
   region            = var.vultr_region
   os_id             = data.vultr_os.ubuntu.id
   label             = "ciris-test-infra"
@@ -351,7 +351,7 @@ resource "vultr_instance" "test_infra" {
 # Test Instance 2: Services (CIRISBilling + CIRISProxy)
 resource "vultr_instance" "test_services" {
   count             = var.create_test_env ? 1 : 0
-  plan              = "vc2-2c-4gb"  # 2 vCPU, 4GB RAM ~$24/mo
+  plan              = "vc2-2c-4gb" # 2 vCPU, 4GB RAM ~$24/mo
   region            = var.vultr_region
   os_id             = data.vultr_os.ubuntu.id
   label             = "ciris-test-services"
@@ -370,7 +370,7 @@ resource "vultr_instance" "test_services" {
 # Test Instance 3: Scout (CIRISManager + CIRIS Agent)
 resource "vultr_instance" "test_scout" {
   count             = var.create_test_env ? 1 : 0
-  plan              = var.test_vultr_plan  # vc2-1c-1gb ~$6/mo
+  plan              = var.test_vultr_plan # vc2-1c-1gb ~$6/mo
   region            = var.vultr_region
   os_id             = data.vultr_os.ubuntu.id
   label             = "ciris-test-scout"

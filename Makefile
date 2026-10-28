@@ -1,7 +1,7 @@
 # CIRISBridge Makefile
 # Common development and deployment tasks
 
-.PHONY: help test lint format deploy health clean
+.PHONY: help test test-cov lint lint-terraform lint-ansible lint-shell format deploy deploy-caddy deploy-billing deploy-proxy deploy-server deploy-status health clean
 
 help:
 	@echo "CIRISBridge Makefile"
@@ -10,8 +10,9 @@ help:
 	@echo "  make test      - Run all tests"
 	@echo "  make lint      - Run linters"
 	@echo "  make format    - Format Terraform files"
-	@echo "  make deploy    - Deploy all services"
-	@echo "  make health    - Check service health"
+	@echo "  make deploy    - Deploy all services (site.yml)"
+	@echo "  make deploy-<service> - Deploy one service (caddy, billing, proxy, server, status)"
+	@echo "  make health    - Daily status check"
 	@echo "  make clean     - Clean temp files"
 	@echo ""
 
@@ -41,40 +42,34 @@ lint-shell:
 format:
 	cd terraform && terraform fmt -recursive
 
-# Deployment
+# Deployment (from ansible/, needs the vault password for production.yml)
+PLAYBOOK = cd ansible && ansible-playbook -i inventory/production.yml playbooks/site.yml
+
 deploy:
-	./scripts/deploy.sh all
+	$(PLAYBOOK)
 
-deploy-infra:
-	./scripts/deploy.sh infra
-
-deploy-services:
-	./scripts/deploy.sh services
-
-deploy-dns:
-	./scripts/deploy.sh dns
+deploy-caddy:
+	$(PLAYBOOK) --tags caddy
 
 deploy-billing:
-	./scripts/deploy.sh billing
+	$(PLAYBOOK) --tags billing
 
 deploy-proxy:
-	./scripts/deploy.sh proxy
+	$(PLAYBOOK) --tags proxy
+
+deploy-server:
+	$(PLAYBOOK) --tags ciris-server
+
+deploy-status:
+	$(PLAYBOOK) --tags ciris-status
 
 # Health checks
 health:
-	./scripts/health-check.sh
-
-# Database operations
-backup:
-	./scripts/backup-db.sh
-
-failover-status:
-	./scripts/failover-db.sh status
+	./scripts/daily-status.sh
 
 # Cleaning
 clean:
 	rm -rf terraform/.terraform
-	rm -rf terraform/terraform.tfstate*
 	rm -rf ansible/.ansible_cache
 	rm -rf .pytest_cache
 	rm -rf htmlcov

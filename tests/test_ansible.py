@@ -19,7 +19,6 @@ class TestAnsibleStructure:
             "playbooks",
             "roles",
             "roles/common",
-            "roles/constellation",
             "roles/postgres",
             "roles/caddy",
             "roles/billing",
@@ -36,9 +35,7 @@ class TestAnsibleStructure:
             "ansible.cfg",
             "inventory/production.yml.example",
             "playbooks/site.yml",
-            "playbooks/dns.yml",
-            "playbooks/billing.yml",
-            "playbooks/proxy.yml",
+            "playbooks/spock-billing.yml",
         ]
 
         for filename in required_files:
@@ -107,7 +104,6 @@ class TestAnsibleRoles:
 
     @pytest.mark.parametrize("role", [
         "common",
-        "constellation",
         "postgres",
         "caddy",
         "billing",
@@ -127,7 +123,6 @@ class TestAnsibleRoles:
 
     @pytest.mark.parametrize("role", [
         "common",
-        "constellation",
         "postgres",
         "caddy",
         "billing",
@@ -152,20 +147,6 @@ class TestAnsibleTemplates:
                     assert template_file.suffix == ".j2", \
                         f"Template {template_file} should have .j2 extension"
 
-    def test_constellation_templates(self, ansible_dir):
-        """Test that Constellation role has required templates."""
-        templates_dir = ansible_dir / "roles" / "constellation" / "templates"
-
-        required_templates = [
-            "docker-compose.yml.j2",
-            "config.cfg.j2",
-            "zones.yaml.j2",
-        ]
-
-        for template in required_templates:
-            template_path = templates_dir / template
-            assert template_path.exists(), f"Missing template: {template}"
-
     def test_postgres_templates(self, ansible_dir):
         """Test that PostgreSQL role has required templates."""
         templates_dir = ansible_dir / "roles" / "postgres" / "templates"
@@ -187,7 +168,6 @@ class TestAnsibleTemplates:
         content = caddyfile.read_text()
 
         assert "{{ dns_soa }}" in content, "Caddyfile should reference dns_soa"
-        assert "{{ billing_port }}" in content, "Caddyfile should reference billing_port"
 
 
 class TestAnsiblePlaybooks:
@@ -200,11 +180,12 @@ class TestAnsiblePlaybooks:
 
         required_roles = [
             "common",
-            "constellation",
-            "postgres",
             "caddy",
             "billing",
             "proxy",
+            "ciris-status",
+            "ciris-server",
+            "scheduler",
         ]
 
         for role in required_roles:

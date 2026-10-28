@@ -47,23 +47,6 @@
     port: "22"
     proto: tcp
 
-# DECOMMISSIONED 2026-05-02: Port 53 was open for Constellation DNS, which has
-# been retired in favor of Reticulum. Re-enable if running an authoritative DNS
-# service on these nodes again. (Existing rules on the firewalls will be deleted
-# the next time `ufw delete` runs against them; for now they're harmless since
-# no process listens on :53.)
-# - name: Allow DNS (UDP)
-#   community.general.ufw:
-#     rule: allow
-#     port: "53"
-#     proto: udp
-#
-# - name: Allow DNS (TCP)
-#   community.general.ufw:
-#     rule: allow
-#     port: "53"
-#     proto: tcp
-
 - name: Allow HTTP (for ACME)
   community.general.ufw:
     rule: allow
@@ -83,6 +66,21 @@
     to_port: "8000"
     proto: tcp
     comment: "Docker to billing API"
+
+# Nothing listens on 5432 (the billing database is Spock on 5433), so no node
+# should accept it from its peer.
+- name: Remove the PostgreSQL 5432 peer rule
+  community.general.ufw:
+    rule: allow
+    port: "5432"
+    proto: tcp
+    from_ip: "{{ item }}"
+    delete: true
+  loop:
+    - 108.61.242.236  # US
+    - 46.224.81.217   # EU
+  when: ciris_environment | default('production') == 'production'
+  tags: [firewall]
 
 - name: Install Docker GPG key
   ansible.builtin.apt_key:

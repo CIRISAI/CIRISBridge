@@ -91,9 +91,7 @@ fi
 # SPOCK BACKUP/REPLICATION STATUS CHECK
 # ============================================================================
 # Billing data lives on ciris-billing-spock (port 5433, multi-master via pgEdge
-# Spock). The legacy ciris-postgres (port 5432) was decommissioned 2026-05-02
-# — this check used to query it and was firing daily false-alarm
-# "Service Errors Detected" alerts.
+# Spock).
 echo ""
 echo "--- Spock Replication Check ---"
 
