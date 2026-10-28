@@ -13,6 +13,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ansible.cfg names ~/.vault_pass. CI has no encrypted files (the
+      # production inventory is not committed), so any password will do.
+      - name: Placeholder vault password
+        run: echo ci-placeholder > ~/.vault_pass
+
       # The action installs its own ansible-core and the collections in
       # requirements.yml; pinned to the v26.10.1 commit.
       - name: Run ansible-lint
@@ -32,12 +37,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Install ansible-lint and collections
         run: |
-          pip install ansible-lint
+          pip install "ansible-lint==26.10.1"
           ansible-galaxy collection install -r ansible/requirements.yml
+          echo ci-placeholder > ~/.vault_pass
 
       - name: Run ansible-lint with JSON output
         run: |
