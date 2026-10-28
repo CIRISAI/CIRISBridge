@@ -44,3 +44,17 @@
     name: ciris-spock-backup.timer
     enabled: true
     state: started
+
+- name: Restart OOM watchdog service
+  ansible.builtin.systemd:
+    name: ciris-oom-watchdog.service
+    state: restarted
+    enabled: true
+    daemon_reload: true
+
+- name: Restart read-API watchdog service
+  ansible.builtin.systemd:
+    name: ciris-readapi-watchdog.service
+    state: restarted
+    enabled: true
+    daemon_reload: true

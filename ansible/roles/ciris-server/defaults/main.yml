@@ -1,0 +1,53 @@
+---
+# CIRISServer role defaults
+# Replaces CIRISLens — see ansible/roles/lens/ for the retired predecessor.
+# Wheel: pip install ciris-server==<version> on python:3.12-slim.
+# Runbook: ../CIRISServer/FSD/LENS_TO_SERVER_MIGRATION.md
+
+ciris_server_version: "0.5.239"
+ciris_server_image_tag: "ciris-server:{{ ciris_server_version }}"
+
+# Log filter override. Empty = RUST_LOG unset, so the binary's own EnvFilter
+# default ("info") applies. Set only for a bounded diagnostic window, via -e on
+# the deploy, then redeploy without it, e.g. CIRISServer#788:
+#   -e ciris_server_rust_log=info,ciris_edge::replication=debug,...
+ciris_server_rust_log: ""
+
+# One-off install of a local wheel instead of PyPI (e.g. an untagged CI build
+# for a coordinated cutover). Empty = the normal PyPI pin above. Pass all three
+# with -e, never commit them; the next deploy without them returns to PyPI:
+#   -e ciris_server_version=0.5.232
+#   -e ciris_server_wheel=/abs/path/ciris_server-0.5.232-...-manylinux_2_39_x86_64.whl
+#   -e ciris_server_wheel_sha256=<64 hex>
+# The sha256 is checked on the controller and again on the host after copy.
+ciris_server_wheel: ""
+ciris_server_wheel_sha256: ""
+
+# Host paths
+ciris_server_data_dir: /data/cirisserver
+ciris_server_build_dir: /opt/ciris/server
+
+# Wire/directory identity = "<key_id>-<fp(sha256(ed_pubkey))>" via fedcode::derive_key_id;
+# the on-disk keystore alias stays as bare --key-id. Node A is the canonical seed per
+# BRIDGE_SEED_MESH.md (Stage-5 target = CANONICAL_TRANSPORT_KEY_ID = ciris-canonical-1).
+ciris_server_home: /var/lib/ciris
+ciris_server_key_id: ciris-canonical-1
+
+# Reticulum transport port (UDP+TCP). Read API binds net.listen_addr + 1 = :4243.
+ciris_server_reticulum_port: 4242
+ciris_server_read_port: 4243
+
+# Default to NEVER wipe on redeploy — identity must persist byte-identically across
+# upgrades. Override with `-e ciris_server_fresh=true` for a clean rebuild.
+ciris_server_fresh: false
+
+# Upgrade snapshots: how many data.bak.*/identity.bak.* pairs to retain.
+# Each is a full corpus copy (~1.4 GB). Unbounded retention filled the disk to
+# 96% on 2026-08-28 (186 snapshots / 29 GB) and fail-safe demoted the canonical
+# out of its federation role — see the prune task in tasks/main.yml.
+ciris_server_bak_retain: 2
+
+# ciris-server refuses the lens-store role below this much free disk and runs
+# as a Reticulum relay only. Mirrors the value baked into the wheel; the deploy
+# asserts against it rather than letting the node silently demote itself.
+ciris_server_lens_store_min_gib: 5

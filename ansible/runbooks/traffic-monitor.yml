@@ -69,13 +69,22 @@
             docker stats --no-stream --format "table {% raw %}{{.Name}}\t{{.NetIO}}{% endraw %}" | grep -E 'ciris|lens' || echo "No CIRIS containers"
             echo ""
 
-            # Recent request rate from Caddy (if logging enabled)
-            if docker logs ciris-caddy --since 1m 2>&1 | grep -q "HTTP"; then
-              echo "--- CADDY REQUESTS (last 60s) ---"
-              TOTAL=$(docker logs ciris-caddy --since 1m 2>&1 | grep -c "HTTP" || echo 0)
-              echo "Total requests: $TOTAL"
-              echo "Requests/sec: $(echo "scale=2; $TOTAL / 60" | bc)"
-            fi
+            # Caddy writes ACCESS logs as JSON to /var/log/caddy/*.log (the
+            # Caddyfile `log { output file ... }` blocks). `docker logs
+            # ciris-caddy` carries only its operational lines (TLS maintenance,
+            # health checks), so every count this runbook took from it was
+            # wrong: it reported "Total requests: 1" while the access logs held
+            # ~385/h. recent N -> access-log lines from the last N seconds.
+            # tail bounds the read: the logs are append-only and >100 MB.
+            recent() {
+              _c=$(( $(date +%s) - $1 ))
+              for _f in /var/log/caddy/*.log; do [ -f "$_f" ] && tail -n 20000 "$_f"; done 2>/dev/null \
+                | awk -v c="$_c" -F'"ts":' 'NF>1 { split($2, a, ","); if (a[1] + 0 > c) print }'
+            }
+            echo "--- CADDY REQUESTS (last 60s, from access logs) ---"
+            TOTAL=$(recent 60 | wc -l)
+            echo "Total requests: $TOTAL"
+            echo "Requests/sec: $(awk -v t="$TOTAL" 'BEGIN { printf "%.2f", t / 60 }')"
           register: snapshot
           changed_when: false
 
@@ -120,19 +129,34 @@
             docker stats --no-stream --format "table {% raw %}{{.Name}}\t{{.NetIO}}\t{{.CPUPerc}}\t{{.MemUsage}}{% endraw %}" | grep -E 'NAME|ciris|lens'
             echo ""
 
-            # Caddy access patterns (if available)
+            # Caddy writes ACCESS logs as JSON to /var/log/caddy/*.log (the
+            # Caddyfile `log { output file ... }` blocks). `docker logs
+            # ciris-caddy` carries only its operational lines (TLS maintenance,
+            # health checks), so every count this runbook took from it was
+            # wrong: it reported "Total requests: 1" while the access logs held
+            # ~385/h. recent N -> access-log lines from the last N seconds.
+            # tail bounds the read: the logs are append-only and >100 MB.
+            recent() {
+              _c=$(( $(date +%s) - $1 ))
+              for _f in /var/log/caddy/*.log; do [ -f "$_f" ] && tail -n 20000 "$_f"; done 2>/dev/null \
+                | awk -v c="$_c" -F'"ts":' 'NF>1 { split($2, a, ","); if (a[1] + 0 > c) print }'
+            }
+            R=$(recent 300)
             echo "--- ENDPOINT DISTRIBUTION (last 5 min) ---"
-            docker logs ciris-caddy --since 5m 2>&1 | grep -oE '"(GET|POST|PUT|DELETE) [^"]+' | sed 's/"//g' | awk '{print $1, $2}' | sort | uniq -c | sort -rn | head -15 || echo "No Caddy logs"
+            printf '%s\n' "$R" | sed -n 's/.*"method":"\([A-Z]*\)".*"uri":"\([^"?]*\).*/\1 \2/p' \
+              | sort | uniq -c | sort -rn | head -15
+            [ -z "$R" ] && echo "  (no requests in window)"
             echo ""
 
-            # Response codes
             echo "--- RESPONSE CODES (last 5 min) ---"
-            docker logs ciris-caddy --since 5m 2>&1 | grep -oE '" [0-9]{3} ' | awk '{print $2}' | sort | uniq -c | sort -rn || echo "No response codes"
+            printf '%s\n' "$R" | grep -oE '"status":[0-9]{3}' | cut -d: -f2 | sort | uniq -c | sort -rn
             echo ""
 
-            # Request timing (if available)
+            # duration is float SECONDS in the Caddy JSON. The old regex matched
+            # "duration":1000+ as if it were milliseconds, so it never fired.
             echo "--- SLOW REQUESTS (>1s, last 5 min) ---"
-            docker logs ciris-caddy --since 5m 2>&1 | grep -E '"duration":[1-9][0-9]{3,}' | tail -5 || echo "No slow requests"
+            SLOW=$(printf '%s\n' "$R" | awk -F'"duration":' 'NF>1 { split($2, a, ","); if (a[1] + 0 > 1) printf "%.2fs\n", a[1] }' | sort -rn | head -5)
+            [ -n "$SLOW" ] && printf '%s\n' "$SLOW" || echo "  none"
           register: analysis
           changed_when: false
 
@@ -183,10 +207,27 @@
               ALERTS="${ALERTS}WARNING: Single IP $TOP_IP has $TOP_IP_COUNT connections\n"
             fi
 
+            # Caddy writes ACCESS logs as JSON to /var/log/caddy/*.log (the
+            # Caddyfile `log { output file ... }` blocks). `docker logs
+            # ciris-caddy` carries only its operational lines (TLS maintenance,
+            # health checks), so every count this runbook took from it was
+            # wrong: it reported "Total requests: 1" while the access logs held
+            # ~385/h. recent N -> access-log lines from the last N seconds.
+            # tail bounds the read: the logs are append-only and >100 MB.
+            recent() {
+              _c=$(( $(date +%s) - $1 ))
+              for _f in /var/log/caddy/*.log; do [ -f "$_f" ] && tail -n 20000 "$_f"; done 2>/dev/null \
+                | awk -v c="$_c" -F'"ts":' 'NF>1 { split($2, a, ","); if (a[1] + 0 > c) print }'
+            }
             # Check 5xx error rate
-            TOTAL_REQ=$(docker logs ciris-caddy --since 5m 2>&1 | grep -c "HTTP" || true)
-            TOTAL_REQ=${TOTAL_REQ:-1}
-            ERROR_5XX=$(docker logs ciris-caddy --since 5m 2>&1 | grep -cE '" 5[0-9]{2} ' || true)
+            # This is the DDoS / error-rate alarm. Before 2026-09-23 it could not
+            # fire: the old 5xx regex (a quote, space, 5xx code, space) never matches the Caddy JSON
+            # ("status":502), so ERROR_5XX was always 0, and TOTAL_REQ counted
+            # "HTTP" in the operational stream rather than real requests.
+            R5=$(recent 300)
+            TOTAL_REQ=$(printf '%s\n' "$R5" | grep -c '"status":' || true)
+            TOTAL_REQ=${TOTAL_REQ:-0}
+            ERROR_5XX=$(printf '%s\n' "$R5" | grep -cE '"status":5[0-9]{2}' || true)
             ERROR_5XX=${ERROR_5XX:-0}
             if [ "$TOTAL_REQ" -gt 0 ] 2>/dev/null; then
               ERROR_RATE=$((ERROR_5XX * 100 / TOTAL_REQ))
@@ -198,7 +239,7 @@
             fi
 
             # Check request rate
-            REQ_1M=$(docker logs ciris-caddy --since 1m 2>&1 | grep -c "HTTP" || true)
+            REQ_1M=$(recent 60 | grep -c '"status":' || true)
             REQ_1M=${REQ_1M:-0}
             RPS=$((REQ_1M / 60))
             if [ "$RPS" -gt {{ rps_critical }} ]; then
@@ -211,7 +252,7 @@
             if [ -n "$ALERTS" ]; then
               echo "ANOMALIES DETECTED:"
               echo ""
-              echo -e "$ALERTS"
+              printf '%b' "$ALERTS"
             else
               echo "✓ No anomalies detected"
               echo ""
@@ -336,10 +377,19 @@
             echo "=== {{ inventory_hostname | upper }} - BASELINE CAPTURE ==="
             echo ""
 
+            # Access logs, not `docker logs` — see the SNAPSHOT block. A baseline
+            # taken from the operational stream recorded ~0 RPS, which made any
+            # later comparison against it meaningless.
+            recent() {
+              _c=$(( $(date +%s) - $1 ))
+              for _f in /var/log/caddy/*.log; do [ -f "$_f" ] && tail -n 20000 "$_f"; done 2>/dev/null \
+                | awk -v c="$_c" -F'"ts":' 'NF>1 { split($2, a, ","); if (a[1] + 0 > c) print }'
+            }
             # Gather metrics
             CONN=$(ss -tan state established | wc -l)
             SYN=$(ss -tan state syn-recv | wc -l)
-            REQ_1M=$(docker logs ciris-caddy --since 1m 2>&1 | grep -c "HTTP" || echo 0)
+            REQ_1M=$(recent 60 | grep -c '"status":' || true)
+            REQ_1M=${REQ_1M:-0}
             RPS=$((REQ_1M / 60))
 
             # Save baseline

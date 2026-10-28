@@ -12,6 +12,30 @@
     }
 }
 
+# LiteLLM serves its admin API, admin UI, SSO login and OpenAPI docs on the
+# same port as the client API. None of that is for external parties, so only
+# the routes CIRIS clients call reach it and everything else is a plain 404
+# (a 401 tells a scanner the admin route exists). Client set measured from
+# the proxy1 access logs, Aug–Oct 2026: agents (OpenAI SDK) use chat
+# completions and models; ciris-status uses /v1/status; /v1/status/simple and
+# /v1/web/search are CIRISProxy's own routes (server.py).
+(litellm_client_api) {
+{% if proxy_enabled | default(true) %}
+    @client_api path /v1/chat/completions /v1/models /v1/status /v1/status/simple /v1/web/search
+    handle @client_api {
+        reverse_proxy ciris-proxy:4000 {
+            health_uri /health/liveliness
+            health_interval 30s
+        }
+    }
+    handle {
+        respond 404
+    }
+{% else %}
+    respond "Service temporarily unavailable" 503
+{% endif %}
+}
+
 # Billing API
 billing1.{{ dns_soa }} {
     reverse_proxy host.docker.internal:8000 {
@@ -32,16 +56,10 @@ billing1.{{ dns_soa }} {
     }
 }
 
-# LLM Proxy (primary endpoint)
-llm01.{{ dns_soa }} {
-{% if proxy_enabled | default(true) %}
-    reverse_proxy ciris-proxy:4000 {
-        health_uri /health/liveliness
-        health_interval 30s
-    }
-{% else %}
-    respond "Service temporarily unavailable" 503
-{% endif %}
+# LLM Proxy (primary endpoint — llm01.* is the name agents use; proxy1.* is the canonical infra name)
+# EU omits llm01.{{ dns_soa }} — no DNS record for llm01.ciris-services-2.ai; EU legacy name is llm01.ciris-services-eu-1.com
+proxy1.{{ dns_soa }}{% if inventory_hostname == 'vultr' %}, llm01.{{ dns_soa }}{% endif %} {
+    import litellm_client_api
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -51,10 +69,29 @@ llm01.{{ dns_soa }} {
     }
 
     log {
-        output file /var/log/caddy/llm01.log
+        output file /var/log/caddy/proxy1.log
         format json
     }
 }
+
+{% if inventory_hostname == 'hetzner' %}
+# EU legacy proxy hostname (agents use llm01.ciris-services-eu-1.com as ciris_secondary)
+llm01.ciris-services-eu-1.com {
+    import litellm_client_api
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/proxy1.log
+        format json
+    }
+}
+{% endif %}
 
 {% if inventory_hostname == 'vultr' %}
 # Agents endpoint (US only, same as billing for now)
@@ -73,37 +110,75 @@ agents.{{ dns_soa }} {
 }
 # CIRISLens - Observability (US node only)
 lens.{{ dns_soa }} {
-    # Public accord API endpoints (no auth required) — CANONICAL
-    # Includes: /api/v1/accord/repository/* (traces, statistics, registry, verification)
-    #           /api/v1/accord/events (trace ingestion from agents)
-    handle /api/v1/accord/* {
-        reverse_proxy cirislens-api:8000
+    # ── CIRISServer (Node A, v0.5.0) — zero-env CLI-flag boot ─────────────
+    # See ../../CIRISServer/FSD/BRIDGE_UPGRADE_v0.5.0.md. Hostname kept; endpoint
+    # surface = frozen 7 read endpoints + /v1/identity + HTTP trace ingest.
+    handle /lens/api/v1/* {
+        header Access-Control-Allow-Origin "https://ciris.ai"
+        reverse_proxy ciris-server:4243
     }
 
-    # Deprecated alias — kept for backward compat with older agent clients.
-    # Lens responds 200 OK but logs a DEPRECATED WARN per request.
-    # Will be removed once all clients migrate to /api/v1/accord/*.
-    handle /api/v1/covenant/* {
-        reverse_proxy cirislens-api:8000
+    handle /v1/identity {
+        reverse_proxy ciris-server:4243
     }
 
-    # Scoring API endpoints (public, no auth required)
+    # /v1/federation/* — node-code (public bootstrap handle), self-key-record (the
+    # canonical fingerprinted key_id), etc. /v1/identity emits the keystore alias;
+    # /v1/federation/self-key-record emits the derived "<label>-<fp>" — that's the
+    # one to use for the canonical-key_id verification gate until CIRISServer#34 lands.
+    handle /v1/federation/* {
+        reverse_proxy ciris-server:4243
+    }
+
+    # Trace-ingest 404 fix (runbook §5). The legacy CIRIS-AccordMetrics emitter
+    # POSTs here; v0.5.0 accepts the path directly (no rewrite). Expected: 401
+    # until the agent ships the 2.9.7 fold (persist v9 hybrid hard-cut; runbook §6).
+    handle /lens-api/api/v1/accord/events {
+        reverse_proxy ciris-server:4243
+    }
+
+    # ── ciris-status (Node B, v0.3.0) — ciris-server + StatusAdapter ──────
+    # Read API binds inside the container on :4243 (same internal port as Node A;
+    # different container, different docker DNS name → no clash on lens_cirislens).
+    # flush_interval -1 = SSE (/api/v1/*/live) + WS (/api/v1/status/ws) pass-through.
+    # Node B's memory diagnostics (/api/v1/debug/memory) is UNGATED in the image:
+    # no auth, and it answers on the published port, unlike ciris-server 0.5.199
+    # which serves the equivalent report loopback-only behind CIRIS_DIAGNOSTICS
+    # (403 from the docker bridge gateway). It discloses no keys/identity/PII —
+    # only mallinfo2 + /proc counters — but unauthenticated it is a live feedback
+    # oracle: an attacker can watch RssAnon/VmSwap/fordblks move in response to
+    # their own traffic and steer a memory-exhaustion attempt on a node that
+    # already carries a known allocator-churn problem (CIRISStatus#69).
+    #
+    # PARTIAL mitigation. This closes the discoverable hostname path only;
+    # http://<host>:4253/api/v1/debug/* still answers directly, because 4253 must
+    # stay open for remote agents' delegation claims. The real fix is gating the
+    # route in the image the way 0.5.199 does — filed upstream.
+    # More specific matcher than /status/*, so Caddy prefers it.
+    handle /status/api/v1/debug/* {
+        respond "404 — diagnostics not exposed" 404
+    }
+
+    handle_path /status/* {
+        reverse_proxy ciris-status:4243 {
+            flush_interval -1
+        }
+    }
+
+    # Legacy-compat: ciris.ai/ciris-scoring/ JS bundle hits the bare /api/v1/scoring
+    # path. Route to Node B's adapter surface — field-compatible per CIRISStatus README.
+    handle /api/v1/scoring {
+        reverse_proxy ciris-status:4243
+    }
     handle /api/v1/scoring/* {
-        reverse_proxy cirislens-api:8000
+        reverse_proxy ciris-status:4243
     }
 
-    # CIRISLens API routes (log ingestion, admin) - specific paths only
-    handle /ingest/* {
-        reverse_proxy cirislens-api:8000
-    }
-    handle /lens-api/* {
-        uri strip_prefix /lens-api
-        reverse_proxy cirislens-api:8000
-    }
-
-    # Everything else goes to Grafana (including /api for Grafana's own API)
+    # OLD lens endpoints (/api/v1/accord/*, /api/v1/covenant/*, /api/v1/scoring/*,
+    # /api/v1/identity, /lens-api/*, /ingest/*, Grafana fallback) are GONE.
+    # Clients on those paths will 404. Migration guide in the runbook above.
     handle {
-        reverse_proxy cirislens-grafana:3000
+        respond "404 — lens retired; see /v1/identity and /lens/api/v1/*" 404
     }
 
     header {
@@ -119,6 +194,63 @@ lens.{{ dns_soa }} {
 }
 {% endif %}
 
+{% if caddy_failover_billing_domains is defined %}
+# Failover: billing endpoints from the failed region.
+# Set caddy_failover_billing_domains in inventory during an outage; clear on failback.
+{% for domain in caddy_failover_billing_domains %}
+{{ domain }} {
+    reverse_proxy host.docker.internal:8000 {
+        health_uri /health
+        health_interval 30s
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/billing-failover.log
+        format json
+    }
+}
+{% endfor %}
+{% endif %}
+
+{% if caddy_failover_proxy_domains is defined %}
+# Failover: proxy endpoints from the failed region.
+# Set caddy_failover_proxy_domains in inventory during an outage; clear on failback.
+{% for domain in caddy_failover_proxy_domains %}
+{{ domain }} {
+    import litellm_client_api
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/proxy-failover.log
+        format json
+    }
+}
+{% endfor %}
+{% endif %}
+
+{% if caddy_failover_apex_domains is defined %}
+# Failover: apex/health domains from the failed region.
+# Set caddy_failover_apex_domains in inventory during an outage; clear on failback.
+{% for domain in caddy_failover_apex_domains %}
+{{ domain }} {
+    respond "CIRIS Infrastructure - {{ domain }} (failover)" 200
+}
+{% endfor %}
+{% endif %}
+
 # Root domain - redirect to docs or landing page
 {{ dns_soa }} {
     respond "CIRIS Infrastructure - {{ dns_soa }}" 200
@@ -130,7 +262,7 @@ lens.{{ dns_soa }} {
 
 llm.ciris.ai {
     tls /opt/ciris/caddy/certs/llm.ciris.ai.fullchain.pem /opt/ciris/caddy/certs/llm.ciris.ai.privkey.pem
-    reverse_proxy ciris-proxy:4000
+    import litellm_client_api
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"

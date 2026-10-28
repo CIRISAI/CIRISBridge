@@ -5,6 +5,15 @@ services:
     image: caddy:2-alpine
     container_name: ciris-caddy
     restart: unless-stopped
+    # Unbounded json-file logs are a disk-fill path, and on this node a full
+    # disk fail-safe demotes ciris-server out of its federation role
+    # (lens_store=false). Cap every container: 3 x 50 MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    mem_limit: 256m
     ports:
       - "80:80"
       - "443:443"
@@ -14,6 +23,10 @@ services:
       - ./data:/data
       - ./config:/config
       - ./certs:/opt/ciris/caddy/certs:ro
+      # Persist access logs to host so we can grep them post-restart
+      # and from outside the container. Lens / billing / llm01 logs
+      # were accumulating only inside the container until this bind.
+      - /var/log/caddy:/var/log/caddy
     environment:
       CADDY_INGRESS_NETWORKS: ciris
 {% if ciris_environment | default('production') == 'test' %}

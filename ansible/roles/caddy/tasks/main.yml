@@ -14,6 +14,7 @@
   loop:
     - /opt/ciris/caddy/data
     - /opt/ciris/caddy/config
+    - /var/log/caddy   # access logs (lens.log, billing.log, llm01.log, …) — bound into the container
 
 - name: Copy Caddyfile (production)
   ansible.builtin.template:

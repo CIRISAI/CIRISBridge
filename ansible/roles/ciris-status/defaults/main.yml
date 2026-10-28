@@ -1,0 +1,41 @@
+---
+# ciris-status — Node B = a ciris-server node + a StatusAdapter (v0.3.0+).
+# Zero-env CLI-flag boot via [--home, --key-id]. The image bundles both the
+# fabric node (engine, corpus, edge, consent:replication) AND the status
+# adapter (probe loop, /api/v1/scoring roster). Replication to Node A is
+# wired AFTER boot via the API (operator-driven, not env-driven).
+# Runbook: ../../CIRISStatus/DEPLOY.md
+# Runbook: ../../CIRISServer/FSD/BRIDGE_UPGRADE_v0.5.0.md §9
+
+ciris_status_version: "v0.3.75"
+ciris_status_image: "ghcr.io/cirisai/cirisstatus:{{ ciris_status_version }}"
+
+# Host paths
+ciris_status_data_dir: /data/cirisstatus
+ciris_status_build_dir: /opt/ciris/status
+
+# CLI flags (v0.3.1 fixes libtss2 crash + inherits server v0.5.1's key_id fix).
+# Wire/directory identity becomes "<key_id>-<b32(sha256(pubkey))>". Node B is the
+# first status monitor; future status nodes follow ciris-status-{2,3,...}.
+ciris_status_home: /data
+ciris_status_key_id: ciris-status-1
+
+# Read API binds CIRIS_SERVER_LISTEN_ADDR + 1 internally → 4243.
+# Caddy reverse-proxies the public /status/* path here via docker DNS.
+ciris_status_read_port: 4243
+
+# Reticulum transport port (UDP+TCP). NOT published to host to avoid clashing
+# with ciris-server's 4242 — same-host A↔B mesh paths go via docker DNS.
+ciris_status_reticulum_port: 4242
+
+# Default to NEVER wipe on redeploy — identity must persist across upgrades.
+# Override with `-e ciris_status_fresh=true` for a clean rebuild (rotates the
+# minted Ed25519/ML-DSA-65 pair → new fingerprint in the derived key_id).
+ciris_status_fresh: false
+
+# Upgrade snapshots: how many data.bak.*/identity.bak.* pairs to retain.
+# Added 2026-09-11: this role had NO backup step while ciris-server did, and
+# ciris-status upgrades apply the same one-way persist migrations (this node
+# went schema 137 -> 143 on v0.3.75). Without a snapshot those are
+# unrecoverable — there is no version pin that walks a schema backwards.
+ciris_status_bak_retain: 2

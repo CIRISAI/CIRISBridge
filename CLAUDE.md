@@ -51,6 +51,13 @@ Agents cannot serve this mission if users cannot reach them. CIRISBridge provide
 - Includes resilience patterns: CircuitBreaker, ExponentialBackoff (fixes LENS-001)
 - Clone with: `git clone --recurse-submodules`
 - Update with: `git submodule update --init --recursive`
+- CI (`deploy.yml`, `sonarcloud.yml`) uses `submodules: recursive` — SDK is always present at build time
+
+**CIRISProxy LiteLLM pin (2026-06-29):** `litellm==1.90.0` / base image `ghcr.io/berriai/litellm:v1.90.0`.
+- Bumped from 1.83.10 to fix CVE-2026-49468 (Critical — auth bypass via Host Header Injection, affects < 1.84.0)
+- `-stable` channel topped out at v1.83.14; v1.84+ ship without the suffix
+- Source of truth: `CIRISProxy/pyproject.toml` + `CIRISProxy/Dockerfile`
+- Note: `CIRISProxy/docs/THREAT_MODEL.md` still references 1.83.10 — needs updating in that repo
 
 ## Current Infrastructure
 
@@ -174,21 +181,48 @@ curl -X POST https://proxy-test.ciris-services-1.ai/v1/chat/completions \
 - Test token stored in Ansible Vault
 - Destroyed when not in use
 
-### Legacy Infrastructure (Pending Migration)
+### Legacy Infrastructure — DECOMMISSIONED (verified 2026-09-07)
 
-These servers predate CIRISBridge and need DNS cutover. See `runbooks/legacy-migration.yml`.
+All three legacy servers are **gone from the Vultr account**. Confirmed against the
+Vultr API, not inferred: none of `149.28.113.123`, `149.28.120.73` or
+`108.61.119.117` appears in `/v2/instances`, and the account holds no reserved IPs.
+**Those IPs have been reassigned to other Vultr customers.** That — not a rebuild —
+is why SSH to `149.28.120.73` reports `REMOTE HOST IDENTIFICATION HAS CHANGED`.
 
-| Server | IP | Vultr ID | Status | Purpose |
-|--------|----|-----------| -------|---------|
-| llm | 149.28.113.123 | fed95dff-... | Running | Old proxy for llm.ciris.ai |
-| billing | 149.28.120.73 | 0d8a8c69-... | Running | Old billing for billing.ciris.ai |
-| cirisnode0 | 108.61.119.117 | 47c2431c-... | **Stopped** | Deprecated |
+| Server | IP | State |
+|--------|----|-------|
+| llm | 149.28.113.123 | released — **not ours** |
+| billing | 149.28.120.73 | released — **not ours** |
+| cirisnode0 | 108.61.119.117 | released — **not ours** |
 
-**Migration plan:**
-1. Update Cloudflare DNS: `llm.ciris.ai` CNAME → `proxy1.ciris-services-1.ai`
-2. Update Cloudflare DNS: `billing.ciris.ai` CNAME → `billing1.ciris-services-1.ai`
-3. Monitor traffic shift for 24-48h
-4. Decommission legacy servers (~$30/month savings)
+Never SSH to these addresses and never restore a config that deploys to them. The
+CIRISBilling `deploy.yml` that did (with `ssh-keyscan` + `StrictHostKeyChecking=no`,
+so it would have accepted whatever machine now holds the IP) was deleted in
+CIRISBilling#9, and its now-unused `DEPLOY_SSH_KEY` secret was deleted 2026-09-07.
+
+**Migration status — one of the two cutovers is incomplete:**
+
+- `billing.ciris.ai` — **DONE.** Serves the bridge; `/health` returns
+  `{"status":"healthy","database":"connected"}`, matching
+  `billing1.ciris-services-1.ai`.
+- `llm.ciris.ai` — **unused; delete the record.** Nothing consumes this hostname
+  (confirmed by Eric 2026-09-07), so the Cloudflare **526** it returns (origin SSL
+  certificate invalid) is not an outage and there is nothing to cut over. Do NOT
+  repoint it at `proxy1.ciris-services-1.ai` — that would resurrect a name with no
+  consumers.
+
+  It is still worth removing rather than leaving. The record points at an origin
+  we no longer own (`149.28.113.123`, released and reassigned), which is a dangling
+  `ciris.ai` name; the 526 shows Cloudflare currently refuses it, but that refusal
+  is the origin's cert failing validation, not a deliberate control. Low risk, and
+  deleting the record retires it entirely.
+
+  **The bridge cannot do this.** `vault_cloudflare_api_token` is scoped to
+  `ciris-services-1.ai` + `ciris-services-2.ai`; the `ciris.ai` zone is not visible
+  to it. Needs a credential for that zone.
+
+`runbooks/legacy-migration.yml` is retained for its DNS-verification tasks; its
+`decommission` tag is a no-op now that the instances are gone.
 
 ### Internal Ports (per node)
 

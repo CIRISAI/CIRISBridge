@@ -1,0 +1,98 @@
+---
+# ciris-status (Node B) — ciris-server node + StatusAdapter, v0.3.0 zero-env.
+# Boot inputs are the --home + --key-id CLI flags. NO env vars are read by the
+# node (CIRIS_SERVER_*) or the adapter (STATUS_*). All non-default config is
+# authored as signed config:* CEG objects via the API after ownership is claimed.
+# Replication peering is wired by the operator at runtime — NOT in this compose.
+# Runbook: ../../CIRISStatus/DEPLOY.md, BRIDGE_UPGRADE_v0.5.0.md §9.
+
+services:
+  ciris-status:
+    image: {{ ciris_status_image }}
+    container_name: ciris-status
+    restart: unless-stopped
+    # Unbounded json-file logs are a disk-fill path, and on this node a full
+    # disk fail-safe demotes ciris-server out of its federation role
+    # (lens_store=false). Cap every container: 3 x 50 MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    # Sized from measurement, and RAISED once the measurement said to.
+    #
+    # History: 1536m was set against an UNCAPPED process (~1.46 GB committed,
+    # ~1.4 GB of it allocator free list). With the arena cap the anon set settles
+    # near 570 MB, so on 2026-09-07 this was cut to 896m (~1.5x settled RssAnon)
+    # with the cgroup's memory.events "max" at 0.
+    #
+    # That was too tight, and the cgroup said so. On v0.3.68, 56 min uptime:
+    #   memory.current 769 MB / 896      max events 1241 -> 6821 in 43 min
+    #   anon 552.3 MB   file 214.8 MB (active_file 165.0)   pgsteal 337410
+    # Continuous enforcement, not a boot transient. It is CACHE reclaim rather
+    # than anon thrashing (swap only 40 MB), so it never risked an OOM kill —
+    # but this node reads its corpus constantly and repeatedly evicting those
+    # pages is exactly the first-load latency the status page complains about.
+    #
+    # 1216m = anon (~570) + room for the ~215 MB working file cache and headroom,
+    # still returning 320 MB against the original 1536m. Host has 2.1 GB
+    # available and limits are ceilings, not reservations.
+    #
+    # The rule, restated because it has now fired once: if memory.events "max"
+    # climbs at STEADY STATE (not just during boot), this limit goes UP. Boot
+    # alone will always generate some — judge it after ~30 min of uptime.
+    mem_limit: 1216m
+    # NO environment: block, deliberately — do not add one.
+    #
+    # This node caps its own glibc malloc arenas from inside the binary as of
+    # v0.3.63, before it builds its runtime (CIRISStatus#69: -847 MB committed,
+    # live memory unchanged at ~44 MB). Earlier bridge deploys set
+    # MALLOC_ARENA_MAX=2 here while that fix was in flight; it has been REMOVED
+    # because the binary now owns the decision.
+    #
+    # Keeping it would put an env var back into a deployment whose contract is
+    # that it reads none (DEPLOY.md §2), leaving a future reader unable to tell
+    # whether it is load-bearing or leftover, and splitting one decision across
+    # two places that can drift. An explicit value here would still win — glibc
+    # reads it before the process runs — which is exactly why silence is safer.
+    #
+    # Verify which path ran from the boot log:
+    #   "capped glibc malloc arenas ..."                   <- correct (binary)
+    #   "MALLOC_ARENA_MAX set in the environment ..."      <- someone re-added it
+    # Two CLI flags, no environment: block.
+    # No --diagnostics: the route is UNMOUNTED, which is the steady state.
+    #
+    # v0.3.72+ takes --diagnostics[=MINUTES] (default 120, value only via `=`,
+    # non-numeric REFUSED) and self-closes: past the window the handler answers
+    # 404, indistinguishable from never-mounted. Verified on 2026-09-10 —
+    # opened for 120 min, and at 125 min /api/v1/debug/memory returned 404
+    # while /v1/identity still returned 200.
+    #
+    # Add it back ONLY for a measurement. An unopened window is not an expired
+    # one (CIRISStatus#82): with no flag the gate alone keeps the route off,
+    # which is what we want between measurements — self-closing makes leaving
+    # it in SAFE, not correct, since every redeploy would reopen a fresh window.
+    #
+    # Why it matters that this is off by default: the route is not loopback-
+    # bound here (ciris-server pairs its gate with require_loopback; an adapter
+    # cannot) and :4253 is 0.0.0.0/0 for delegation claims. Caddy 404s the
+    # proxied /status/api/v1/debug/* path; nothing covers host:4253.
+    command: ["--home", "{{ ciris_status_home }}", "--key-id", "{{ ciris_status_key_id }}"]
+    volumes:
+      # This node's OWN corpus + identity volume — NEVER mount Node A's data/.
+      - {{ ciris_status_data_dir }}:{{ ciris_status_home }}
+    ports:
+      # Status node read-API on host port 4253 (A holds 4243 on the host).
+      # Remote agents post the delegation claim to http://<host>:4253/...
+      - "4253:{{ ciris_status_read_port }}"
+      # Reticulum (:4242) stays unpublished — A is the seed; peers discover B
+      # through A's transport node forwarding on the docker network.
+    networks:
+      - cirislens
+    # No healthcheck — image is Rust-binary distroless-style (no shell tools).
+    # Liveness verified by the smoke probe + Caddy 502 detection + daily-status.
+
+networks:
+  cirislens:
+    external: true
+    name: lens_cirislens

@@ -26,6 +26,7 @@
     image: "{{ pgedge_image }}"
     state: started
     restart_policy: "{{ pgedge_restart_policy }}"
+    memory: "768m"
     network_mode: host
     env:
       POSTGRES_USER: "{{ pgedge_user }}"

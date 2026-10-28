@@ -1,0 +1,197 @@
+#!/bin/sh
+# ciris-readapi-watchdog.sh — restarts ciris-server when its read API hangs.
+#
+# THE FAILURE (CIRISServer#506)
+# After ~22 h of uptime the read API stops accepting: the socket stays LISTEN,
+# Recv-Q climbs, every request returns 0 bytes, and the process neither panics
+# nor restarts. Cause is a runtime worker parked in uninterruptible disk wait
+# (`state=D wchan=wait_on_page_bit_common`) on the advertise-path corpus scan,
+# so futures stop being polled. CPU is idle throughout — nothing crashes, and
+# `/v1/system/health` is served by the same starved runtime, so the node cannot
+# report its own outage. A container restart clears it; it then recurs.
+#
+# WHY THIS IS NOT THE OOM WATCHDOG'S JOB
+# Different signal, different remedy. That one watches cgroup oom_kill counters
+# and its escalation is a host reboot. This one watches liveness and its
+# remedy is a CONTAINER restart — the failure is process-local, and rebooting
+# a host for it would be wildly disproportionate.
+#
+# THE FALSE-POSITIVE THIS MUST NOT HAVE
+# ciris-server binds :4243 BEFORE it can serve, then spends the boot-prime
+# window (O(registered peers) of crypto, CIRISServer#501) not accepting. On
+# 2026-08-29 that window was ~3 minutes and Recv-Q reached 11 before draining
+# normally. A watchdog that probed naively would restart mid-boot and loop
+# forever, never letting the node finish priming. So:
+#   - nothing is judged until the container has been up GRACE_SECS (well past
+#     the observed worst case),
+#   - a restart requires FAIL_THRESHOLD consecutive failures, not one blip,
+#   - after acting we wait COOLDOWN_SECS; a hang inside that window is
+#     reported but NOT acted on, so a genuinely broken build cannot become a
+#     restart loop. Escalating repeatedly is worse than staying down loudly.
+#
+# Deployed by Ansible: roles/scheduler/tasks/main.yml (US node only).
+
+set -u
+
+LOG=/var/log/ciris/readapi-watchdog.log
+STATE_DIR=/run/ciris-watchdog
+CONTAINER=ciris-server
+PORT={{ ciris_server_read_port | default(4243) }}
+POLL_SECS=30
+PROBE_TIMEOUT=8
+GRACE_SECS=420        # 7 min: > the ~3 min boot-prime window, with margin
+FAIL_THRESHOLD=4      # ~2 min of sustained failure before acting
+COOLDOWN_SECS=1800    # 30 min between automatic restarts
+
+LENS_ENDPOINT="{{ cirislens_endpoint }}/lens-api/api/v1/logs/ingest"
+SERVICE_TOKEN="{{ scheduler_service_token | default('') }}"
+NODE_NAME="{{ node_name | default('us') }}"
+
+mkdir -p "$STATE_DIR" "$(dirname "$LOG")"
+FORENSICS=/opt/ciris/scheduler/ciris-readapi-forensics.sh
+FAIL_FILE="$STATE_DIR/readapi.fails"
+LAST_FILE="$STATE_DIR/readapi.last_restart"
+RC_FILE="$STATE_DIR/readapi.restartcount"
+
+ts()  { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+log() { printf "%s %s\n" "$(ts)" "$*" | tee -a "$LOG"; }
+
+alert_lens() {
+    _msg="$1"; _lvl="$2"; _q="$3"; _act="$4"
+    [ -z "$SERVICE_TOKEN" ] && return 0
+    _p=$(cat <<EOF
+{
+  "service_name": "ciris-readapi-watchdog",
+  "server_id": "${NODE_NAME}",
+  "level": "${_lvl}",
+  "message": "${_msg}",
+  "event": "read_api_hang",
+  "timestamp": "$(ts)",
+  "attributes": {
+    "node": "${NODE_NAME}",
+    "container": "${CONTAINER}",
+    "port": "${PORT}",
+    "accept_queue": "${_q}",
+    "action": "${_act}",
+    "issue": "CIRISServer#506"
+  }
+}
+EOF
+)
+    curl -s -o /dev/null -X POST "${LENS_ENDPOINT}" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${SERVICE_TOKEN}" \
+        -d "${_p}" --connect-timeout 5 --max-time 10 2>/dev/null || true
+}
+
+# Seconds since the container started; empty if it is not running.
+uptime_secs() {
+    _s=$(docker inspect "$CONTAINER" --format '{{ '{{' }}.State.StartedAt{{ '}}' }}' 2>/dev/null) || return 1
+    [ -n "$_s" ] || return 1
+    _e=$(date -u -d "$_s" +%s 2>/dev/null) || return 1
+    echo $(( $(date -u +%s) - _e ))
+}
+
+# Completed-but-unaccepted connections on the listen socket ('' if not bound).
+accept_queue() {
+    _pid=$(docker inspect "$CONTAINER" --format '{{ '{{' }}.State.Pid{{ '}}' }}' 2>/dev/null) || return 1
+    [ -n "$_pid" ] && [ "$_pid" != "0" ] || return 1
+    nsenter -t "$_pid" -n ss -tln 2>/dev/null \
+      | awk -v p=":$PORT\$" '$1 == "LISTEN" && $4 ~ p { print $2; exit }'
+}
+
+log "INFO: read-API watchdog starting — ${CONTAINER}:${PORT}, grace=${GRACE_SECS}s threshold=${FAIL_THRESHOLD} cooldown=${COOLDOWN_SECS}s"
+
+while true; do
+    sleep "$POLL_SECS"
+
+    up=$(uptime_secs) || continue
+
+    # CRASH LOOP — the gap this watchdog had until 2026-09-11.
+    #
+    # Everything below is gated on uptime >= GRACE_SECS, which is right for the
+    # #506 hang (it only appears after ~22 h) but means a container that dies
+    # and restarts every few seconds is NEVER judged: it never accumulates the
+    # grace period. The OOM watchdog does not cover it either — it keys on the
+    # cgroup oom_kill counter, and a crash loop exits 1, not by SIGKILL.
+    #
+    # Found the hard way: ciris-server 0.5.205 crash-looped 16 times on a boot
+    # RuntimeError (CIRISServer#586) and BOTH watchdogs stayed silent through
+    # ~7 minutes of the canonical being down. The ansible smoke probe caught it
+    # only because a human was running a deploy at the time.
+    #
+    # Report, do NOT restart: restarting a container that cannot boot just
+    # accelerates the loop. This is a "wake someone" signal, and the remedy is
+    # a version rollback, which is not a decision to automate.
+    rc=$(docker inspect "$CONTAINER" --format '{{ '{{' }}.RestartCount{{ '}}' }}' 2>/dev/null || echo 0)
+    prev_rc=0; [ -f "$RC_FILE" ] && prev_rc=$(cat "$RC_FILE")
+    echo "${rc:-0}" > "$RC_FILE"
+    if [ "$up" -lt 120 ] && [ "${rc:-0}" -gt "$prev_rc" ] && [ "${rc:-0}" -ge 3 ]; then
+        last_err=$(docker logs "$CONTAINER" --tail 40 2>&1 | grep -iE "error|panic|traceback|fatal" | tail -1 | cut -c1-160)
+        log "CRITICAL: ${CONTAINER} is CRASH LOOPING — RestartCount=${rc} (was ${prev_rc}), uptime only ${up}s. NOT restarting; a container that cannot boot is not helped by another restart. Last error: ${last_err}"
+        alert_lens "container crash looping — restart count ${rc}, uptime ${up}s" "CRITICAL" "0" "none_crash_loop"
+        continue
+    fi
+
+    # Still inside the boot-prime window: bound but legitimately not accepting.
+    if [ "$up" -lt "$GRACE_SECS" ]; then
+        echo 0 > "$FAIL_FILE"
+        continue
+    fi
+
+    # curl already prints 000 via -w on transport failure; a `|| echo 000`
+    # here would append a SECOND one and log the nonsense "http=000000".
+    code=$(curl -sS --max-time "$PROBE_TIMEOUT" -o /dev/null \
+             -w '%{http_code}' "http://localhost:${PORT}/v1/identity" 2>/dev/null)
+    [ -n "$code" ] || code=000
+
+    if [ "$code" = "200" ]; then
+        prev=0; [ -f "$FAIL_FILE" ] && prev=$(cat "$FAIL_FILE")
+        [ "$prev" -gt 0 ] && log "OK: read API answering again after ${prev} failed probe(s)"
+        echo 0 > "$FAIL_FILE"
+        continue
+    fi
+
+    # Only count it if the socket is actually bound. Not bound means the
+    # process is restarting or gone — a different problem, not this one.
+    q=$(accept_queue) || { echo 0 > "$FAIL_FILE"; continue; }
+    [ -n "$q" ] || { echo 0 > "$FAIL_FILE"; continue; }
+
+    fails=0; [ -f "$FAIL_FILE" ] && fails=$(cat "$FAIL_FILE")
+    fails=$((fails + 1))
+    echo "$fails" > "$FAIL_FILE"
+    log "WARNING: read API not answering (http=${code}, accept_queue=${q}, consecutive=${fails}/${FAIL_THRESHOLD})"
+    [ "$fails" -ge "$FAIL_THRESHOLD" ] || continue
+
+    now=$(date -u +%s)
+    last=0; [ -f "$LAST_FILE" ] && last=$(cat "$LAST_FILE")
+    since=$((now - last))
+    if [ "$last" -gt 0 ] && [ "$since" -lt "$COOLDOWN_SECS" ]; then
+        log "CRITICAL: read API hung again only ${since}s after the last restart (cooldown ${COOLDOWN_SECS}s) — NOT restarting. This is no longer a transient hang; a restart loop would hide it. Investigate CIRISServer#506."
+        alert_lens "read API hung inside cooldown — not restarting" "CRITICAL" "$q" "none_cooldown"
+        continue
+    fi
+
+    log "CRITICAL: read API hung (accept_queue=${q}, ${fails} consecutive failures, up ${up}s) — restarting ${CONTAINER} [CIRISServer#506]"
+    alert_lens "read API hung — restarting container" "CRITICAL" "$q" "restart_container"
+
+    # Capture evidence BEFORE the restart destroys it. Every prior occurrence
+    # was reasoned about from the outside because the restart cleared the
+    # state within ~2 min. Time-bounded (~75 s) and failure-isolated: a bug in
+    # here must never prevent the restart that restores service.
+    if [ -x "$FORENSICS" ]; then
+        log "INFO: capturing forensics before restart (~75s) — $FORENSICS"
+        "$FORENSICS" "$CONTAINER" "$PORT" >/dev/null 2>&1 || \
+            log "WARNING: forensics capture failed; continuing to restart"
+        newest=$(ls -1dt /var/log/ciris/forensics/*/ 2>/dev/null | head -1)
+        [ -n "$newest" ] && log "INFO: forensics written to ${newest}"
+    fi
+    if docker restart "$CONTAINER" >/dev/null 2>&1; then
+        log "INFO: ${CONTAINER} restarted; expect ~3 min of boot prime before it answers"
+    else
+        log "ERROR: docker restart ${CONTAINER} FAILED"
+        alert_lens "docker restart failed" "CRITICAL" "$q" "restart_failed"
+    fi
+    echo "$now" > "$LAST_FILE"
+    echo 0 > "$FAIL_FILE"
+done

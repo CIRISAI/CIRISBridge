@@ -1,0 +1,146 @@
+---
+# Deploy ciris-status — Node B = ciris-server node + StatusAdapter (v0.3.0).
+# Zero-env CLI-flag boot via [--home, --key-id]. The image mints its OWN
+# Ed25519+ML-DSA-65 identity at first boot under --home/identity/.
+# Replication peering is configured AFTER boot via API (operator-driven, not env).
+#
+# Production: US node only (lens-host-adjacent).
+
+- name: Check if this is a status node
+  ansible.builtin.set_fact:
+    is_ciris_status_node: "{{ (node_name | default('') == 'us') or (deploy_ciris_status | default(false)) }}"
+
+- name: Skip if not a status node
+  ansible.builtin.debug:
+    msg: "Skipping CIRISStatus deployment — only runs on US/status nodes"
+  when: not is_ciris_status_node
+
+- name: Deploy CIRISStatus
+  when: is_ciris_status_node
+  block:
+    # One-shot wipe for the v0.1.0 → v0.3.0 transition: old ciris-status-monitor
+    # key + STATUS_* config artifacts are no longer valid under the new shape.
+    # The v0.3.0 image will mint a fresh identity under --key-id=ciris-status.
+    # After the first successful v0.3.0 boot, flip ciris_status_fresh: false.
+    - name: Clear stale CIRISStatus data dir (one-shot v0.1.0→v0.3.0 transition)
+      ansible.builtin.file:
+        path: "{{ ciris_status_data_dir }}"
+        state: absent
+      when: ciris_status_fresh | default(false)
+
+    # Snapshot BEFORE upgrading. This role had no backup step until 2026-09-11
+    # while ciris-server has had one since the 0.5.x cutover — an asymmetry with
+    # no justification: ciris-status is a full fabric node with its own identity
+    # (ciris-status-1-dfql6hsqys) and its own corpus, and it applies the same
+    # persist migrations. v0.3.75 took this node's schema 137 -> 143, which no
+    # version pin can walk back.
+    #
+    # Prune first so a nearly-full disk cannot be tipped over by the snapshot
+    # itself — the failure mode that took the canonical out on 2026-08-28.
+    - name: Check whether prior CIRISStatus data exists (for backup decision)
+      ansible.builtin.stat:
+        path: "{{ ciris_status_data_dir }}/data"
+      register: existing_status_data
+
+    - name: Prune old CIRISStatus upgrade snapshots (keep {{ ciris_status_bak_retain }})
+      ansible.builtin.shell: |
+        set -o pipefail
+        for kind in data identity; do
+          ls -d {{ ciris_status_data_dir }}/${kind}.bak.* 2>/dev/null \
+            | sort | head -n -{{ ciris_status_bak_retain }} | xargs -r rm -rf
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      when: not (ciris_status_fresh | default(false))
+      changed_when: false
+
+    - name: Snapshot CIRISStatus data + identity to .bak before upgrade
+      ansible.builtin.shell: |
+        set -e
+        ts=$(date -u +%Y%m%dT%H%M%SZ)
+        cp -a {{ ciris_status_data_dir }}/data     {{ ciris_status_data_dir }}/data.bak.$ts
+        cp -a {{ ciris_status_data_dir }}/identity {{ ciris_status_data_dir }}/identity.bak.$ts
+        echo "$ts" > {{ ciris_status_data_dir }}/.last-upgrade-bak
+        for kind in data identity; do
+          ls -d {{ ciris_status_data_dir }}/${kind}.bak.* 2>/dev/null \
+            | sort | head -n -{{ ciris_status_bak_retain }} | xargs -r rm -rf
+        done
+      args:
+        executable: /bin/bash
+      when: existing_status_data.stat.exists and not (ciris_status_fresh | default(false))
+      changed_when: true
+
+    - name: Create CIRISStatus build + data directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ ciris_status_build_dir }}", owner: root, group: root, mode: "0755" }
+        - { path: "{{ ciris_status_data_dir }}",  owner: "1000", group: "1000", mode: "0755" }
+
+    - name: Template docker-compose.yml (zero-env)
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: "{{ ciris_status_build_dir }}/docker-compose.yml"
+        mode: "0644"
+      notify: Restart CIRISStatus
+
+    - name: Start CIRISStatus
+      community.docker.docker_compose_v2:
+        project_src: "{{ ciris_status_build_dir }}"
+        state: present
+        pull: always
+
+    # No host port publish (avoids 4243 collision with ciris-server), so probe via
+    # the lens_cirislens docker network using a one-shot curl container.
+    # Non-fatal: ciris-status boot can take >3 min (peering phase); if it times out
+    # the container is still starting — the OOM watchdog handles regressions.
+    - name: Wait + smoke probe — /health via docker network (ciris-status:4243)
+      ansible.builtin.shell: |
+        for i in $(seq 1 60); do
+          out=$(docker run --rm --network lens_cirislens curlimages/curl:latest \
+            -sS --max-time 5 http://ciris-status:4243/health 2>/dev/null || true)
+          if echo "$out" | grep -q '"status"'; then
+            echo "$out"
+            exit 0
+          fi
+          sleep 5
+        done
+        echo '{"status":"PROBE_TIMEOUT","note":"container still booting — check logs"}' >&2
+        echo '{"status":"PROBE_TIMEOUT","note":"container still booting — check logs"}'
+        exit 0
+      register: ciris_status_health_raw
+      changed_when: false
+
+    - name: Decode /health output
+      ansible.builtin.set_fact:
+        ciris_status_health: "{{ ciris_status_health_raw.stdout | from_json }}"
+
+    - name: Capture SignedKeyRecord + ownership banner (for peering setup)
+      ansible.builtin.shell: |
+        docker logs ciris-status 2>&1 \
+          | grep -E "SignedKeyRecord|OWNERSHIP UNCLAIMED|NodeCode|claim PIN|claim_pin|key_id" \
+          | tail -10 || true
+      register: status_boot_banner
+      changed_when: false
+
+    - name: Log Node B summary
+      ansible.builtin.debug:
+        msg: |
+          ciris-status {{ ciris_status_version }} up — Node B (ciris-server + StatusAdapter).
+          --home    = {{ ciris_status_home }}
+          --key-id  = {{ ciris_status_key_id }}
+          health    = {{ ciris_status_health.status | default('?') }}
+          roster    = empty (expected; A→B replication is operator-wired via API)
+
+          Boot artifacts (SignedKeyRecord + NodeCode + claim PIN are one-shot console-only):
+          {{ status_boot_banner.stdout | indent(4) }}
+
+          Next steps (operator, runbook §7 + §9):
+            1. Claim ownership: NodeCode + PIN → POST /v1/setup/root via the desktop client.
+            2. Author replication: POST /v1/federation/peering naming Node A (ciris-server).
+            3. Verify A→B: /api/v1/scoring shows opted-in agents after one poll cadence.

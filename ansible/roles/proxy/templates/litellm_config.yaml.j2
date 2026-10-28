@@ -7,23 +7,53 @@
 # set. Any change to the default chain must be mirrored in PROVIDERS there.
 
 model_list:
-  # Qwen 3.6-35B-A3B - PRIMARY model for CIRIS Agent (2026-04-27)
+  # Qwen 3.6-35B-A3B - PRIMARY model for CIRIS Agent (2026-04-27, rerouted 2026-08-19)
   # MoE: 35B total / 3B active params, 262K context
-  # DeepInfra primary, OpenRouter backup, Groq 27B cross-model failover
-  # extra_body.chat_template_kwargs.enable_thinking=false: disables Qwen3 reasoning chains by default
+  # OpenRouter primary (99.8% uptime, ZDR configured), Groq 27B fast failover,
+  # DeepInfra tertiary (demoted 2026-08-19: 31% degraded over 33h window)
+  #
+  # DRY-BY-CONSTRUCTION (2026-08-27, incident: default alias silently kept
+  # thinking ON via the wrong extra_body key — OpenRouter ignores
+  # chat_template_kwargs entirely, so it's a silent no-op, not an error).
+  # The CIRIS Agent does NOT send its own reasoning-off extras when talking
+  # to this proxy (ciris_engine/.../llm_service/service.py
+  # _build_reasoning_off_extras: `if "ciris-services" in base: return {}` —
+  # it trusts the proxy to already have thinking disabled per upstream
+  # provider). That makes this file the ONLY place thinking gets disabled,
+  # so every alias for the same (provider, model) pair MUST share the exact
+  # same extra_body node — never a hand-copied duplicate. Achieved via YAML
+  # anchors: the block is defined once (&anchor) and every other alias for
+  # that same provider+model references it (*anchor). It is structurally
+  # impossible for an alias to drift out of sync — there is only one object.
+  #
+  # OpenRouter: reasoning.enabled=false. VERIFIED LIVE 2026-08-28 against all 8
+  #   providers serving qwen3.6-35b-a3b. Two wrong answers to avoid:
+  #     - `enable_thinking: false` (top-level or nested) is a SILENT NO-OP here.
+  #       Every provider still reasoned: ~3000-4300 reasoning chars for a 30-char
+  #       answer, ~1000-1400 completion tokens instead of ~15.
+  #     - `reasoning: {exclude: true}` is a TRAP — it strips reasoning from the
+  #       RESPONSE but the model still GENERATES it. DeepInfra: 38.6s with
+  #       exclude vs 1.3s with enabled=false. Clean output, identical latency.
+  #   Measured effect of the correct key (DeepInfra): 31.3s/1193tok -> 1.3s/29tok.
+  # DeepInfra/vLLM (direct, not via OpenRouter): chat_template_kwargs.enable_thinking=false
+  # Groq: NO extra_body — Groq's qwen3.6-27b does not support/need a thinking toggle;
+  #   sending an unrecognized key risks a 422, so omit extra_body entirely.
+  # extra_body.provider.data_collection=deny: enforces ZDR on every OpenRouter request
   - model_name: "qwen-3.6-35b"
     litellm_params:
-      model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
-      api_key: "os.environ/DEEPINFRA_API_KEY"
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
+      model: "openrouter/qwen/qwen3.6-35b-a3b"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body: &openrouter_qwen36_extra
+        reasoning:
+          enabled: false
+        provider:
+          data_collection: "deny"
 
   - model_name: "deepinfra/qwen-3.6-35b"
     litellm_params:
       model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
       api_key: "os.environ/DEEPINFRA_API_KEY"
-      extra_body:
+      extra_body: &deepinfra_qwen36_extra
         chat_template_kwargs:
           enable_thinking: false
 
@@ -31,9 +61,7 @@ model_list:
     litellm_params:
       model: "openrouter/qwen/qwen3.6-35b-a3b"
       api_key: "os.environ/OPENROUTER_API_KEY"
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
+      extra_body: *openrouter_qwen36_extra
 
   # Groq Qwen 3.6-27B - high-speed cross-model failover (2026-08-13)
   # Replaces Llama 4 Scout, which Groq retired. Same Qwen 3.6 family as the
@@ -42,26 +70,23 @@ model_list:
     litellm_params:
       model: "groq/qwen/qwen3.6-27b"
       api_key: "os.environ/GROQ_API_KEY"
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
 
   # Qwen 3.5-35B-A3B - kept for backwards compatibility
   - model_name: "qwen-3.5-35b"
     litellm_params:
       model: "openrouter/qwen/qwen3.5-35b-a3b"
       api_key: "os.environ/OPENROUTER_API_KEY"
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
+      extra_body: &openrouter_qwen35_extra
+        reasoning:
+          enabled: false
+        provider:
+          data_collection: "deny"
 
   - model_name: "openrouter/qwen-3.5-35b"
     litellm_params:
       model: "openrouter/qwen/qwen3.5-35b-a3b"
       api_key: "os.environ/OPENROUTER_API_KEY"
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
+      extra_body: *openrouter_qwen35_extra
 
   - model_name: "deepinfra/qwen-3.5-35b"
     litellm_params:
@@ -79,21 +104,33 @@ model_list:
     litellm_params:
       model: "openrouter/meta-llama/llama-4-scout"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          data_collection: "deny"
 
   - model_name: "openrouter/llama-4-scout"
     litellm_params:
       model: "openrouter/meta-llama/llama-4-scout"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          data_collection: "deny"
 
   - model_name: "llama-4-maverick"
     litellm_params:
       model: "openrouter/meta-llama/llama-4-maverick"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          data_collection: "deny"
 
   - model_name: "openrouter/llama-4-maverick"
     litellm_params:
       model: "openrouter/meta-llama/llama-4-maverick"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          data_collection: "deny"
 
   # GPT-OSS-20B - OpenAI's open-weight model (Apache 2.0)
   # NOTE: Weak at structured outputs / tool calling - kept for reference
@@ -115,22 +152,18 @@ model_list:
       api_key: "os.environ/GROQ_API_KEY"
       max_tokens: 131072
 
+  # gpt-oss is a REASONING model — same OpenRouter reasoning.enabled=false rule
+  # applies (see the DRY-BY-CONSTRUCTION note at the top of this file).
   - model_name: "openrouter/gpt-oss-20b"
     litellm_params:
       model: "openrouter/openai/gpt-oss-20b"
       api_key: "os.environ/OPENROUTER_API_KEY"
       max_tokens: 131072
-
-  # Groq Models (fast, cost-effective)
-  - model_name: "groq/llama-3.3-70b"
-    litellm_params:
-      model: "groq/llama-3.3-70b-versatile"
-      api_key: "os.environ/GROQ_API_KEY"
-
-  - model_name: "groq/llama-3.1-8b"
-    litellm_params:
-      model: "groq/llama-3.1-8b-instant"
-      api_key: "os.environ/GROQ_API_KEY"
+      extra_body:
+        reasoning:
+          enabled: false
+        provider:
+          data_collection: "deny"
 
   # Together AI Models
   - model_name: "together/llama-3.1-70b"
@@ -160,23 +193,23 @@ model_list:
       api_key: "os.environ/OPENAI_API_KEY"
 
   # Aliases for simpler client usage
-  # Default model for CIRIS Agent - Qwen 3.6-35B-A3B via DeepInfra (2026-04-27)
+  # Default model for CIRIS Agent - Qwen 3.6-35B-A3B via OpenRouter (2026-08-19)
+  # extra_body is the *anchor* alias, not a hand-copy — see the DRY-BY-CONSTRUCTION
+  # note above. This is the entry that was broken 2026-08-27 (wrong key, silently
+  # ignored by OpenRouter, thinking stayed ON — up to 343s responses observed).
   - model_name: "default"
     litellm_params:
-      model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
-      api_key: "os.environ/DEEPINFRA_API_KEY"
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
+      model: "openrouter/qwen/qwen3.6-35b-a3b"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body: *openrouter_qwen36_extra
 
-  # Fast alias - Groq Qwen 3.6-27B (high-speed cross-model failover)
+  # Fast alias - Groq Qwen 3.6-27B (high-speed cross-model failover).
+  # No extra_body — matches the plain groq/qwen-3.6-27b entry above; see the
+  # Groq note in the DRY-BY-CONSTRUCTION block for why none is sent.
   - model_name: "fast"
     litellm_params:
       model: "groq/qwen/qwen3.6-27b"
       api_key: "os.environ/GROQ_API_KEY"
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
 
 litellm_settings:
   # Custom callback for CIRISBilling integration
@@ -223,21 +256,21 @@ router_settings:
   cooldown_time: 60
 
   # Fallback chain
-  # Primary: Qwen 3.6 - DeepInfra 35B-A3B → OpenRouter 35B-A3B → Groq 27B
+  # Primary: Qwen 3.6 - OpenRouter 35B-A3B → Groq 27B → DeepInfra 35B-A3B
+  # (DeepInfra demoted 2026-08-19: 31% degraded over 33h availability window)
   fallbacks:
-    - "default": ["openrouter/qwen-3.6-35b", "groq/qwen-3.6-27b"]
-    - "qwen-3.6-35b": ["openrouter/qwen-3.6-35b", "groq/qwen-3.6-27b"]
+    - "default": ["groq/qwen-3.6-27b", "deepinfra/qwen-3.6-35b"]
+    - "qwen-3.6-35b": ["groq/qwen-3.6-27b", "deepinfra/qwen-3.6-35b"]
+    - "openrouter/qwen-3.6-35b": ["groq/qwen-3.6-27b", "deepinfra/qwen-3.6-35b"]
     - "deepinfra/qwen-3.6-35b": ["openrouter/qwen-3.6-35b", "groq/qwen-3.6-27b"]
-    - "openrouter/qwen-3.6-35b": ["deepinfra/qwen-3.6-35b", "groq/qwen-3.6-27b"]
-    - "groq/qwen-3.6-27b": ["deepinfra/qwen-3.6-35b", "openrouter/qwen-3.6-35b"]
-    # Fast alias - Groq first, then full-size Qwen 3.6 deployments
+    - "groq/qwen-3.6-27b": ["openrouter/qwen-3.6-35b", "deepinfra/qwen-3.6-35b"]
+    # Fast alias - Groq first, then OpenRouter, then DeepInfra
     - "fast": ["openrouter/qwen-3.6-35b", "deepinfra/qwen-3.6-35b"]
     # Legacy Llama 4 aliases (deprecated) - cross-model failover to Qwen 3.6
     - "llama-4-scout": ["openrouter/qwen-3.6-35b"]
     - "openrouter/llama-4-scout": ["openrouter/qwen-3.6-35b"]
     - "llama-4-maverick": ["openrouter/qwen-3.6-35b"]
     - "openrouter/llama-4-maverick": ["openrouter/qwen-3.6-35b"]
-    - "groq/llama-3.3-70b": ["together/llama-3.1-70b", "openai/gpt-4o-mini"]
 
 general_settings:
   # Master key for admin operations (not for client auth)

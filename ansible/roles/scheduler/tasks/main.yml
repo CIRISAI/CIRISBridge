@@ -55,6 +55,35 @@
     group: root
   when: inventory_hostname == 'vultr'
 
+- name: Deploy OOM watchdog script (US only — ciris-server + ciris-status run here)
+  ansible.builtin.template:
+    src: ciris-oom-watchdog.sh.j2
+    dest: /opt/ciris/scheduler/ciris-oom-watchdog.sh
+    mode: "0750"
+    owner: root
+    group: root
+  when: inventory_hostname == 'vultr'
+  notify: Restart OOM watchdog service
+
+- name: Deploy read-API watchdog script (US only — ciris-server runs here)
+  ansible.builtin.template:
+    src: ciris-readapi-watchdog.sh.j2
+    dest: /opt/ciris/scheduler/ciris-readapi-watchdog.sh
+    mode: "0750"
+    owner: root
+    group: root
+  when: inventory_hostname == 'vultr'
+  notify: Restart read-API watchdog service
+
+- name: Deploy read-API forensics collector (US only)
+  ansible.builtin.template:
+    src: ciris-readapi-forensics.sh.j2
+    dest: /opt/ciris/scheduler/ciris-readapi-forensics.sh
+    mode: "0750"
+    owner: root
+    group: root
+  when: inventory_hostname == 'vultr'
+
 - name: Deploy Spock billing backup script
   ansible.builtin.template:
     src: ciris-spock-backup.sh.j2
@@ -107,6 +136,43 @@
     src: ciris-spock-backup.service.j2
     dest: /etc/systemd/system/ciris-spock-backup.service
     mode: "0644"
+  notify: Reload systemd
+
+- name: Deploy OOM watchdog service (US only)
+  ansible.builtin.template:
+    src: ciris-oom-watchdog.service.j2
+    dest: /etc/systemd/system/ciris-oom-watchdog.service
+    mode: "0644"
+  when: inventory_hostname == 'vultr'
+  notify:
+    - Reload systemd
+    - Restart OOM watchdog service
+
+- name: Deploy read-API watchdog service (US only)
+  ansible.builtin.template:
+    src: ciris-readapi-watchdog.service.j2
+    dest: /etc/systemd/system/ciris-readapi-watchdog.service
+    mode: "0644"
+  when: inventory_hostname == 'vultr'
+  notify:
+    - Reload systemd
+    - Restart read-API watchdog service
+
+- name: Remove legacy OOM watchdog timer (superseded by live-stream service — a 5-min
+    poll of `docker events --since` silently loses die events to dockerd's 256-entry
+    ring buffer, which proxy/billing/caddy healthcheck traffic evicts in ~10-15 min)
+  ansible.builtin.systemd:
+    name: ciris-oom-watchdog.timer
+    state: stopped
+    enabled: false
+  when: inventory_hostname == 'vultr'
+  failed_when: false
+
+- name: Remove legacy OOM watchdog timer unit file (US only)
+  ansible.builtin.file:
+    path: /etc/systemd/system/ciris-oom-watchdog.timer
+    state: absent
+  when: inventory_hostname == 'vultr'
   notify: Reload systemd
 
 # ============================================================================
@@ -196,6 +262,22 @@
     state: started
     enabled: true
     daemon_reload: true
+
+- name: Ensure read-API watchdog service is enabled and running (US only)
+  ansible.builtin.systemd:
+    name: ciris-readapi-watchdog.service
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: inventory_hostname == 'vultr'
+
+- name: Ensure OOM watchdog service is enabled and running (US only)
+  ansible.builtin.systemd:
+    name: ciris-oom-watchdog.service
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: inventory_hostname == 'vultr'
 
 # ============================================================================
 # INITIAL HEARTBEAT TEST

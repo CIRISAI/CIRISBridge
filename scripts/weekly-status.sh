@@ -60,7 +60,7 @@ for h in s.get("internal", []):
     name = h["name"].upper()
     disk = h.get("disk", {}).get("pct", "?")
     cnt = h.get("container_count", 0)
-    expected = 8 if h["name"] == "us" else 5
+    expected = 7 if h["name"] == "us" else 5
     marker = '✓' if cnt == expected else '⚠'
     print(f"| {name} disk | {disk} |")
     print(f"| {name} containers | {cnt}/{expected} {marker} |")

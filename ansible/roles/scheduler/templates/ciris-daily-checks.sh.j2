@@ -151,6 +151,32 @@ else
 fi
 
 # ============================================================================
+# CONNTRACK TABLE CHECK
+# nf_conntrack exhaustion caused the 2026-08-20 US node network freeze.
+# Alert at >80% of max (now 524288) to allow time to react.
+# ============================================================================
+echo ""
+echo "--- Conntrack Table Check ---"
+
+CT_COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "0")
+CT_MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo "524288")
+CT_PCT=0
+if [ "$CT_MAX" -gt 0 ]; then
+  CT_PCT=$(( CT_COUNT * 100 / CT_MAX ))
+fi
+
+if [ "$CT_PCT" -lt 80 ]; then
+  echo "OK: conntrack ${CT_COUNT}/${CT_MAX} (${CT_PCT}%)"
+  log_to_lens "INFO" "Conntrack table healthy" "conntrack_check_passed" "{\"count\": ${CT_COUNT}, \"max\": ${CT_MAX}, \"pct\": ${CT_PCT}}"
+elif [ "$CT_PCT" -lt 95 ]; then
+  echo "WARNING: conntrack ${CT_COUNT}/${CT_MAX} (${CT_PCT}%) — approaching limit"
+  log_to_lens "WARNING" "Conntrack table filling" "conntrack_check_warning" "{\"count\": ${CT_COUNT}, \"max\": ${CT_MAX}, \"pct\": ${CT_PCT}}"
+else
+  echo "CRITICAL: conntrack ${CT_COUNT}/${CT_MAX} (${CT_PCT}%) — near exhaustion, network freeze risk"
+  log_to_lens "ERROR" "Conntrack table near exhaustion" "conntrack_check_critical" "{\"count\": ${CT_COUNT}, \"max\": ${CT_MAX}, \"pct\": ${CT_PCT}}"
+fi
+
+# ============================================================================
 # DOCKER HEALTH CHECK
 # ============================================================================
 echo ""
