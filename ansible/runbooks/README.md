@@ -92,18 +92,6 @@ ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down
 | Proxy | https://proxy-test.ciris-services-1.ai |
 | Scout | https://scout-test.ciris-services-1.ai |
 
-### Public Covenant Repository
-
-Agent reasoning traces are publicly accessible (no auth required):
-
-```bash
-# Get recent traces (PII scrubbed) — canonical /accord/ prefix
-curl "https://lens.ciris-services-1.ai/api/v1/accord/repository/traces?limit=10"
-
-# Get statistics
-curl "https://lens.ciris-services-1.ai/api/v1/accord/repository/statistics"
-```
-
 ### Configuration Files
 
 | File | Purpose |
@@ -123,33 +111,52 @@ curl "https://lens.ciris-services-1.ai/api/v1/accord/repository/statistics"
 
 ---
 
-## Other Runbooks
+## Production Runbooks
+
+Run from `ansible/` with `-i inventory/production.yml`.
 
 ### Incident Response
 
 | Runbook | Purpose |
 |---------|---------|
-| `incident-response.yml` | General incident management |
-| `intrusion-response.yml` | Security incident handling |
-| `provider-outage.yml` | Cloud provider failover |
+| `incident-response.yml` | General incident management: diagnose, fix, escalate, close |
+| `intrusion-response.yml` | Security incident: IP blocking, forensic collection |
+| `provider-outage.yml` | Provider outage: detect, fail over, fail back |
+| `safety-incident-response.yml` | Safety incident handling |
+| `safety-regional-pause.yml` | Pause service in one region |
+| `safety-global-pause.yml` | Pause service in all regions |
+| `safety-warrant-canary.yml` | Warrant canary verification |
 
 ### Operational
 
 | Runbook | Purpose |
 |---------|---------|
-| `backup-verify.yml` | PostgreSQL backup health |
-| `cert-status.yml` | TLS certificate expiration |
-| `disk-cleanup.yml` | Docker/log cleanup |
-| `security-scan.yml` | Security posture check |
+| `backup-verify.yml` | Spock backup and replication health |
+| `cert-status.yml` | TLS certificate expiry |
+| `cert-rotate.yml` | Rotate certificates for multi-instance deployments |
+| `disk-cleanup.yml` | Docker and log cleanup (`status`, `docker-clean`, `logs-clean`, `full-clean`, `emergency`) |
+| `docker-daemon-restart.yml` | Restart the Docker daemon (`verify`, `restart`); coordinate with CIRISCore, Vault seals |
+| `image-update.yml` | Container image updates |
+| `infra-status.yml` | Provider API status, bandwidth, anomalies |
+| `log-audit.yml` | Service log analysis |
+| `security-scan.yml` | SSH hardening, firewall and update posture |
+| `traffic-monitor.yml` | Network traffic analysis |
+
+### Regions
+
+| Runbook | Purpose |
+|---------|---------|
+| `add-region.yml` | New region provisioning checklist |
+| `remove-region.yml` | Region decommissioning with data archival |
 
 ### Service-Specific
 
 | Runbook | Purpose |
 |---------|---------|
-| `billing-ops.yml` | Billing database queries |
-| `billing-rollback.yml` | Rollback billing version |
+| `billing-ops.yml` | Billing reports and lookups (`status`, `lookup`, `usage`, `tools`, `transactions`, `stats`) |
+| `billing-rollback.yml` | Roll billing back to the previous image |
 | `scout-ops.yml` | Scout agent database queries |
-| `e2e-smoke-test.yml` | Production e2e smoke test (Google OAuth) |
+| `e2e-smoke-test.yml` | Production end-to-end smoke test (Google OAuth) |
 
 ---
 
@@ -211,4 +218,4 @@ Test User (Google OAuth) → Proxy (auth) → Billing (credits) → Groq/Togethe
 
 ---
 
-See [CLAUDE.md](../../CLAUDE.md) for complete runbook documentation.
+See [OPERATIONS.md](../../OPERATIONS.md) for day-to-day operation.
