@@ -8,7 +8,7 @@ keys + probe shape) so cross-team diffs work.
 
 Usage:
 
-    ./surface-scan.py                          # write /tmp/bridge-surface-<ts>.json
+    ./surface-scan.py                          # write <state dir>/bridge-surface-<ts>.json
     ./surface-scan.py --out path.json
     ./surface-scan.py --manifest scripts/surface.yml
     ./surface-scan.py --diff a.json b.json     # diff two snapshots
@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import socket
 import ssl
 import subprocess
@@ -316,7 +317,7 @@ def summarize(snap: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", default=str(Path(__file__).parent / "surface.yml"))
-    ap.add_argument("--out", help="output path (default: /tmp/bridge-surface-<ts>.json)")
+    ap.add_argument("--out", help="output path (default: $XDG_STATE_HOME/cirisbridge/bridge-surface-<ts>.json)")
     ap.add_argument("--internal", action="store_true", help="capture internal state via SSH")
     ap.add_argument("--host-filter", help="filter probes by site_id substring")
     ap.add_argument("--diff", nargs=2, metavar=("A", "B"), help="diff two snapshots")
@@ -344,7 +345,9 @@ def main() -> int:
         out_path = Path(args.out)
     else:
         ts = snap["captured_at"].replace(":", "").replace("-", "")[:15]
-        out_path = Path(f"/tmp/bridge-surface-{ts}.json")
+        state_dir = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "cirisbridge"
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        out_path = state_dir / f"bridge-surface-{ts}.json"
     out_path.write_text(json.dumps(snap, indent=2))
 
     if not args.quiet:
