@@ -1,36 +1,26 @@
 #!/bin/bash
 # CIRISBridge Daily Health Checks
-# Runs cert-status and backup-verify checks, posts results to CIRISLens
+# Runs cert-status and backup-verify checks; results go to the journal (ciris-scheduler)
 # Managed by Ansible - do not edit manually
 
 set -euo pipefail
 
-LENS_ENDPOINT="{{ cirislens_endpoint }}/lens-api/api/v1/logs/ingest"
-SERVICE_TOKEN="{{ scheduler_service_token }}"
 NODE_NAME="{{ node_name }}"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-log_to_lens() {
+log_event() {
   local level="$1"
   local message="$2"
   local event="$3"
   local metadata="$4"
+  local priority
 
-  curl -s -X POST "${LENS_ENDPOINT}" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${SERVICE_TOKEN}" \
-    -d "{
-      \"service_name\": \"ciris-scheduler\",
-      \"level\": \"${level}\",
-      \"message\": \"${message}\",
-      \"event\": \"${event}\",
-      \"node\": \"${NODE_NAME}\",
-      \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\",
-      \"metadata\": ${metadata}
-    }" \
-    --connect-timeout 5 \
-    --max-time 10 \
-    >/dev/null 2>&1 || true
+  case "${level}" in
+    ERROR) priority=err ;;
+    WARNING) priority=warning ;;
+    *) priority=info ;;
+  esac
+  logger -t ciris-scheduler -p "user.${priority}" "node=${NODE_NAME} event=${event} ${message} ${metadata}" || true
 }
 
 echo "=== CIRISBridge Daily Checks - ${NODE_NAME} - $(date -u) ==="
@@ -44,10 +34,8 @@ echo "--- Certificate Status Check ---"
 {% if node_name == 'us' %}
 DOMAINS="billing1.{{ primary_domain }} proxy1.{{ primary_domain }} agents.{{ primary_domain }} lens.{{ primary_domain }}"
 {% else %}
-# EU uses ciris-services-eu-1.com; the legacy ciris-services-2.ai DNS is retired.
-# EU vhost set on Caddy: billing1, llm01 (EU proxy is named llm01 not proxy1),
-# and apex. proxy1.* and agents.* are .ai-only (geo-routed via Cloudflare).
-DOMAINS="billing1.{{ eu_domain | default('ciris-services-eu-1.com') }} llm01.{{ eu_domain | default('ciris-services-eu-1.com') }} {{ eu_domain | default('ciris-services-eu-1.com') }}"
+# The sites the EU Caddy serves (see roles/caddy/templates/Caddyfile.j2).
+DOMAINS="billing1.{{ dns_soa }} proxy1.{{ dns_soa }} {{ dns_soa }} llm01.ciris-services-eu-1.com"
 {% endif %}
 
 CERT_ISSUES=0
@@ -82,9 +70,9 @@ for domain in $DOMAINS; do
 done
 
 if [ "$CERT_ISSUES" -gt 0 ]; then
-  log_to_lens "ERROR" "Certificate issues detected: ${CERT_ISSUES} problem(s)" "cert_check_failed" "{\"issues\": ${CERT_ISSUES}, \"details\": \"${CERT_DETAILS}\"}"
+  log_event "ERROR" "Certificate issues detected: ${CERT_ISSUES} problem(s)" "cert_check_failed" "{\"issues\": ${CERT_ISSUES}, \"details\": \"${CERT_DETAILS}\"}"
 else
-  log_to_lens "INFO" "All certificates healthy" "cert_check_passed" "{\"details\": \"${CERT_DETAILS}\"}"
+  log_event "INFO" "All certificates healthy" "cert_check_passed" "{\"details\": \"${CERT_DETAILS}\"}"
 fi
 
 # ============================================================================
@@ -143,9 +131,9 @@ else
 fi
 
 if [ "$REPLICATION_OK" = false ]; then
-  log_to_lens "ERROR" "Spock replication issue" "replication_check_failed" "{\"details\": \"${REPLICATION_DETAILS}\"}"
+  log_event "ERROR" "Spock replication issue" "replication_check_failed" "{\"details\": \"${REPLICATION_DETAILS}\"}"
 else
-  log_to_lens "INFO" "Spock replication healthy" "replication_check_passed" "{\"details\": \"${REPLICATION_DETAILS}\", \"lag_mb\": ${LAG_MB}}"
+  log_event "INFO" "Spock replication healthy" "replication_check_passed" "{\"details\": \"${REPLICATION_DETAILS}\", \"lag_mb\": ${LAG_MB}}"
 fi
 
 # ============================================================================
@@ -165,13 +153,13 @@ fi
 
 if [ "$CT_PCT" -lt 80 ]; then
   echo "OK: conntrack ${CT_COUNT}/${CT_MAX} (${CT_PCT}%)"
-  log_to_lens "INFO" "Conntrack table healthy" "conntrack_check_passed" "{\"count\": ${CT_COUNT}, \"max\": ${CT_MAX}, \"pct\": ${CT_PCT}}"
+  log_event "INFO" "Conntrack table healthy" "conntrack_check_passed" "{\"count\": ${CT_COUNT}, \"max\": ${CT_MAX}, \"pct\": ${CT_PCT}}"
 elif [ "$CT_PCT" -lt 95 ]; then
   echo "WARNING: conntrack ${CT_COUNT}/${CT_MAX} (${CT_PCT}%) — approaching limit"
-  log_to_lens "WARNING" "Conntrack table filling" "conntrack_check_warning" "{\"count\": ${CT_COUNT}, \"max\": ${CT_MAX}, \"pct\": ${CT_PCT}}"
+  log_event "WARNING" "Conntrack table filling" "conntrack_check_warning" "{\"count\": ${CT_COUNT}, \"max\": ${CT_MAX}, \"pct\": ${CT_PCT}}"
 else
   echo "CRITICAL: conntrack ${CT_COUNT}/${CT_MAX} (${CT_PCT}%) — near exhaustion, network freeze risk"
-  log_to_lens "ERROR" "Conntrack table near exhaustion" "conntrack_check_critical" "{\"count\": ${CT_COUNT}, \"max\": ${CT_MAX}, \"pct\": ${CT_PCT}}"
+  log_event "ERROR" "Conntrack table near exhaustion" "conntrack_check_critical" "{\"count\": ${CT_COUNT}, \"max\": ${CT_MAX}, \"pct\": ${CT_PCT}}"
 fi
 
 # ============================================================================
@@ -185,13 +173,13 @@ STOPPED_CIRIS=$(docker ps -a --filter "status=exited" --format '{% raw %}{{.Name
 
 if [ -n "$UNHEALTHY_CONTAINERS" ]; then
   echo "WARNING: Unhealthy containers: $UNHEALTHY_CONTAINERS"
-  log_to_lens "WARNING" "Unhealthy containers detected" "container_health_warning" "{\"unhealthy\": \"${UNHEALTHY_CONTAINERS}\"}"
+  log_event "WARNING" "Unhealthy containers detected" "container_health_warning" "{\"unhealthy\": \"${UNHEALTHY_CONTAINERS}\"}"
 elif [ -n "$STOPPED_CIRIS" ]; then
   echo "WARNING: Stopped CIRIS containers: $STOPPED_CIRIS"
-  log_to_lens "WARNING" "Stopped CIRIS containers" "container_stopped_warning" "{\"stopped\": \"${STOPPED_CIRIS}\"}"
+  log_event "WARNING" "Stopped CIRIS containers" "container_stopped_warning" "{\"stopped\": \"${STOPPED_CIRIS}\"}"
 else
   echo "OK: All containers healthy"
-  log_to_lens "INFO" "All containers healthy" "container_health_passed" "{}"
+  log_event "INFO" "All containers healthy" "container_health_passed" "{}"
 fi
 
 # ============================================================================
@@ -205,17 +193,17 @@ DOCKER_USAGE=$(df -h /var/lib/docker 2>/dev/null | awk 'NR==2 {print $5}' | tr -
 
 if [ "$DISK_USAGE" -gt 90 ] || [ "$DOCKER_USAGE" -gt 90 ]; then
   echo "CRITICAL: Disk usage critical - Root: ${DISK_USAGE}%, Docker: ${DOCKER_USAGE}%"
-  log_to_lens "ERROR" "Disk space critical" "disk_check_critical" "{\"root_percent\": ${DISK_USAGE}, \"docker_percent\": ${DOCKER_USAGE}}"
+  log_event "ERROR" "Disk space critical" "disk_check_critical" "{\"root_percent\": ${DISK_USAGE}, \"docker_percent\": ${DOCKER_USAGE}}"
 elif [ "$DISK_USAGE" -gt 80 ] || [ "$DOCKER_USAGE" -gt 80 ]; then
   echo "WARNING: Disk usage elevated - Root: ${DISK_USAGE}%, Docker: ${DOCKER_USAGE}%"
-  log_to_lens "WARNING" "Disk space warning" "disk_check_warning" "{\"root_percent\": ${DISK_USAGE}, \"docker_percent\": ${DOCKER_USAGE}}"
+  log_event "WARNING" "Disk space warning" "disk_check_warning" "{\"root_percent\": ${DISK_USAGE}, \"docker_percent\": ${DOCKER_USAGE}}"
 else
   echo "OK: Disk usage normal - Root: ${DISK_USAGE}%, Docker: ${DOCKER_USAGE}%"
-  log_to_lens "INFO" "Disk space healthy" "disk_check_passed" "{\"root_percent\": ${DISK_USAGE}, \"docker_percent\": ${DOCKER_USAGE}}"
+  log_event "INFO" "Disk space healthy" "disk_check_passed" "{\"root_percent\": ${DISK_USAGE}, \"docker_percent\": ${DOCKER_USAGE}}"
 fi
 
 echo ""
 echo "=== Daily checks complete ==="
 
-# Final summary heartbeat
-log_to_lens "INFO" "Daily checks completed" "daily_checks_complete" "{\"cert_issues\": ${CERT_ISSUES}, \"replication_ok\": ${REPLICATION_OK}, \"disk_percent\": ${DISK_USAGE}}"
+# Final summary
+log_event "INFO" "Daily checks completed" "daily_checks_complete" "{\"cert_issues\": ${CERT_ISSUES}, \"replication_ok\": ${REPLICATION_OK}, \"disk_percent\": ${DISK_USAGE}}"

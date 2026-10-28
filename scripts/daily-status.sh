@@ -111,16 +111,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────
-# 3. Heartbeat freshness — RETIRED 2026-06-25.
-# ─────────────────────────────────────────────────────────────
-# Scheduler timers POST heartbeats to /lens-api/api/v1/logs/ingest, which
-# Caddy 404s post-cutover (2026-06-17). cirislens.service_logs hasn't received
-# a new heartbeat since the cutover, so checking against it perpetually fails.
-# Real fleet liveness is covered by the probe + container + errors checks above.
-# Re-enable after the scheduler is repointed at ciris-server's CEG ingest.
-
-# ─────────────────────────────────────────────────────────────
-# 3a. Conntrack table — raised to 524288 after 2026-08-20 freeze
+# 3. Conntrack table (nf_conntrack_max is set in the common role)
 #     Alert at >80% to give time to react before exhaustion.
 # ─────────────────────────────────────────────────────────────
 CT_COUNT=$($SSH_US 'cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null' 2>/dev/null)

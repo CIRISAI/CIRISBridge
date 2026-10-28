@@ -39,8 +39,6 @@ WINDOW_SECS=900        # rolling window for the reboot escalation (15 min)
 REBOOT_THRESHOLD=3     # real OOM kills in that window before rebooting
 CONTAINERS="ciris-server ciris-status"
 
-LENS_ENDPOINT="{{ cirislens_endpoint }}/lens-api/api/v1/logs/ingest"
-SERVICE_TOKEN="{{ scheduler_service_token | default('') }}"
 NODE_NAME="{{ node_name | default('us') }}"
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG")"
@@ -65,31 +63,10 @@ oom_kill_count() {
     awk '$1 == "oom_kill" { print $2; found=1 } END { if (!found) print "" }' "$_path" 2>/dev/null
 }
 
-alert_lens() {
+alert() {
     _c="$1"; _delta="$2"; _win="$3"
-    [ -z "$SERVICE_TOKEN" ] && return 0
-    _payload=$(cat <<EOF
-{
-  "service_name": "ciris-oom-watchdog",
-  "server_id": "${NODE_NAME}",
-  "level": "CRITICAL",
-  "message": "cgroup_oom_kill",
-  "event": "oom_kill",
-  "timestamp": "$(ts)",
-  "attributes": {
-    "node": "${NODE_NAME}",
-    "container": "${_c}",
-    "oom_kills_this_check": "${_delta}",
-    "oom_kills_in_window": "${_win}",
-    "source": "cgroup memory.events oom_kill"
-  }
-}
-EOF
-)
-    curl -s -o /dev/null -X POST "${LENS_ENDPOINT}" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer ${SERVICE_TOKEN}" \
-        -d "${_payload}" --connect-timeout 5 --max-time 10 2>/dev/null || true
+    logger -t ciris-oom-watchdog -p user.crit \
+        "node=${NODE_NAME} container=${_c} cgroup_oom_kill this_check=${_delta} in_window=${_win}" || true
 }
 
 log "INFO: watchdog starting — cgroup oom_kill counters for: $CONTAINERS"
@@ -133,7 +110,7 @@ while true; do
         in_window=$(wc -l < "$hist_file" | tr -d ' ')
 
         log "CRITICAL: $name OOM-killed by the cgroup limit (${delta} this check; ${in_window} in the last $((WINDOW_SECS / 60)) min)"
-        alert_lens "$name" "$delta" "$in_window"
+        alert "$name" "$delta" "$in_window"
 
         if [ "$in_window" -ge "$REBOOT_THRESHOLD" ]; then
             log "CRITICAL: $name hit ${in_window} real OOM kills within $((WINDOW_SECS / 60)) min — rebooting to break the loop"

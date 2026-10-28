@@ -43,8 +43,6 @@ GRACE_SECS=420        # 7 min: > the ~3 min boot-prime window, with margin
 FAIL_THRESHOLD=4      # ~2 min of sustained failure before acting
 COOLDOWN_SECS=1800    # 30 min between automatic restarts
 
-LENS_ENDPOINT="{{ cirislens_endpoint }}/lens-api/api/v1/logs/ingest"
-SERVICE_TOKEN="{{ scheduler_service_token | default('') }}"
 NODE_NAME="{{ node_name | default('us') }}"
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG")"
@@ -56,32 +54,10 @@ RC_FILE="$STATE_DIR/readapi.restartcount"
 ts()  { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { printf "%s %s\n" "$(ts)" "$*" | tee -a "$LOG"; }
 
-alert_lens() {
+alert() {
     _msg="$1"; _lvl="$2"; _q="$3"; _act="$4"
-    [ -z "$SERVICE_TOKEN" ] && return 0
-    _p=$(cat <<EOF
-{
-  "service_name": "ciris-readapi-watchdog",
-  "server_id": "${NODE_NAME}",
-  "level": "${_lvl}",
-  "message": "${_msg}",
-  "event": "read_api_hang",
-  "timestamp": "$(ts)",
-  "attributes": {
-    "node": "${NODE_NAME}",
-    "container": "${CONTAINER}",
-    "port": "${PORT}",
-    "accept_queue": "${_q}",
-    "action": "${_act}",
-    "issue": "CIRISServer#506"
-  }
-}
-EOF
-)
-    curl -s -o /dev/null -X POST "${LENS_ENDPOINT}" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer ${SERVICE_TOKEN}" \
-        -d "${_p}" --connect-timeout 5 --max-time 10 2>/dev/null || true
+    logger -t ciris-readapi-watchdog -p user.crit \
+        "node=${NODE_NAME} container=${CONTAINER} port=${PORT} level=${_lvl} accept_queue=${_q} action=${_act} ${_msg}" || true
 }
 
 # Seconds since the container started; empty if it is not running.
@@ -129,7 +105,7 @@ while true; do
     if [ "$up" -lt 120 ] && [ "${rc:-0}" -gt "$prev_rc" ] && [ "${rc:-0}" -ge 3 ]; then
         last_err=$(docker logs "$CONTAINER" --tail 40 2>&1 | grep -iE "error|panic|traceback|fatal" | tail -1 | cut -c1-160)
         log "CRITICAL: ${CONTAINER} is CRASH LOOPING — RestartCount=${rc} (was ${prev_rc}), uptime only ${up}s. NOT restarting; a container that cannot boot is not helped by another restart. Last error: ${last_err}"
-        alert_lens "container crash looping — restart count ${rc}, uptime ${up}s" "CRITICAL" "0" "none_crash_loop"
+        alert "container crash looping — restart count ${rc}, uptime ${up}s" "CRITICAL" "0" "none_crash_loop"
         continue
     fi
 
@@ -168,12 +144,12 @@ while true; do
     since=$((now - last))
     if [ "$last" -gt 0 ] && [ "$since" -lt "$COOLDOWN_SECS" ]; then
         log "CRITICAL: read API hung again only ${since}s after the last restart (cooldown ${COOLDOWN_SECS}s) — NOT restarting. This is no longer a transient hang; a restart loop would hide it. Investigate CIRISServer#506."
-        alert_lens "read API hung inside cooldown — not restarting" "CRITICAL" "$q" "none_cooldown"
+        alert "read API hung inside cooldown — not restarting" "CRITICAL" "$q" "none_cooldown"
         continue
     fi
 
     log "CRITICAL: read API hung (accept_queue=${q}, ${fails} consecutive failures, up ${up}s) — restarting ${CONTAINER} [CIRISServer#506]"
-    alert_lens "read API hung — restarting container" "CRITICAL" "$q" "restart_container"
+    alert "read API hung — restarting container" "CRITICAL" "$q" "restart_container"
 
     # Capture evidence BEFORE the restart destroys it. Every prior occurrence
     # was reasoned about from the outside because the restart cleared the
@@ -190,7 +166,7 @@ while true; do
         log "INFO: ${CONTAINER} restarted; expect ~3 min of boot prime before it answers"
     else
         log "ERROR: docker restart ${CONTAINER} FAILED"
-        alert_lens "docker restart failed" "CRITICAL" "$q" "restart_failed"
+        alert "docker restart failed" "CRITICAL" "$q" "restart_failed"
     fi
     echo "$now" > "$LAST_FILE"
     echo 0 > "$FAIL_FILE"

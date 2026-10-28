@@ -1,12 +1,10 @@
 #!/bin/bash
 # CIRISBridge Weekly Cleanup
-# Cleans Docker resources and logs, reports to CIRISLens
+# Cleans Docker resources and logs; results go to the journal (ciris-scheduler)
 # Managed by Ansible - do not edit manually
 
 set -euo pipefail
 
-LENS_ENDPOINT="{{ cirislens_endpoint }}/lens-api/api/v1/logs/ingest"
-SERVICE_TOKEN="{{ scheduler_service_token }}"
 NODE_NAME="{{ node_name }}"
 
 # Thresholds
@@ -15,27 +13,19 @@ LOG_LINES_TO_KEEP=1000
 BUILD_CACHE_AGE=72  # hours
 JOURNAL_RETENTION_DAYS=7
 
-log_to_lens() {
+log_event() {
   local level="$1"
   local message="$2"
   local event="$3"
   local metadata="$4"
+  local priority
 
-  curl -s -X POST "${LENS_ENDPOINT}" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${SERVICE_TOKEN}" \
-    -d "{
-      \"service_name\": \"ciris-scheduler\",
-      \"level\": \"${level}\",
-      \"message\": \"${message}\",
-      \"event\": \"${event}\",
-      \"node\": \"${NODE_NAME}\",
-      \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\",
-      \"metadata\": ${metadata}
-    }" \
-    --connect-timeout 5 \
-    --max-time 10 \
-    >/dev/null 2>&1 || true
+  case "${level}" in
+    ERROR) priority=err ;;
+    WARNING) priority=warning ;;
+    *) priority=info ;;
+  esac
+  logger -t ciris-scheduler -p "user.${priority}" "node=${NODE_NAME} event=${event} ${message} ${metadata}" || true
 }
 
 echo "=== CIRISBridge Weekly Cleanup - ${NODE_NAME} - $(date -u) ==="
@@ -120,7 +110,7 @@ echo "Builder cleanup: $BUILDER_RECLAIMED"
 echo "Logs truncated: $TRUNCATED files"
 echo "Journal: $JOURNAL_FREED"
 
-log_to_lens "INFO" "Weekly cleanup completed" "weekly_cleanup_complete" "{\"disk_before\": \"${DISK_BEFORE}\", \"disk_after\": \"${DISK_AFTER}\", \"logs_truncated\": ${TRUNCATED}}"
+log_event "INFO" "Weekly cleanup completed" "weekly_cleanup_complete" "{\"disk_before\": \"${DISK_BEFORE}\", \"disk_after\": \"${DISK_AFTER}\", \"logs_truncated\": ${TRUNCATED}}"
 
 echo ""
 echo "=== Weekly cleanup complete ==="
