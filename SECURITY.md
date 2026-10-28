@@ -1,245 +1,128 @@
 # CIRISBridge Security Guide
 
-This document describes the security measures currently implemented in CIRISBridge infrastructure.
+The security model of the production nodes: what is exposed, how requests are
+authenticated, what data is kept, and how secrets are handled.
 
-## Network Architecture
+## Network exposure
 
-### Public Exposure
+### Public
 
-Only the following ports are exposed to the internet:
+| Port | Node | Service |
+|------|------|---------|
+| 22/tcp | US, EU | SSH, keys only |
+| 80/tcp | US, EU | Caddy (ACME challenges, redirect to HTTPS) |
+| 443/tcp, 443/udp | US, EU | Caddy (HTTPS, HTTP/3) |
+| 4242/tcp, 4242/udp | US | ciris-server Reticulum transport |
+| 4243/tcp | US | ciris-server read API (signed, public data only) |
+| 4253/tcp | US | CIRISStatus read API |
 
-| Port | Service | Purpose |
-|------|---------|---------|
-| 22/tcp | SSH | Administrative access (key-based only) |
-| 53/udp,tcp | Constellation DNS | Public DNS service |
-| 80/tcp | Caddy | ACME HTTP-01 challenges only |
-| 443/tcp | Caddy | HTTPS traffic (all services) |
+Ports published by Docker bypass UFW, so the exposure above is what Docker
+publishes plus what UFW allows; `scripts/surface-scan.py` records it for
+review.
 
-### Internal Services
+### Internal
 
-All application services bind to localhost and are proxied through Caddy:
+| Service | Reachable from |
+|---------|----------------|
+| Billing API (8000) | Caddy and local Docker networks |
+| LiteLLM (4000) | localhost; Caddy forwards only the client routes |
+| Spock (5433) | The other node's IP only |
+| Vault (8210–8211) | Vault peers only; owned by CIRISCore |
 
-| Service | Internal Binding | External Path |
-|---------|------------------|---------------|
-| CIRISBilling | 127.0.0.1:8000 | /api/*, /admin-ui/* |
-| CIRISProxy | 127.0.0.1:4000 | /v1/* |
-| CIRISLens API | 127.0.0.1:8200 | /lens-api/* |
-| Grafana | 127.0.0.1:3001 | / (lens subdomain) |
+### What Caddy forwards to the proxy
 
-### Docker Network Isolation
+The proxy hostnames forward only `/v1/chat/completions`, `/v1/models`,
+`/v1/status`, `/v1/status/simple` and `/v1/web/search`. LiteLLM's admin API,
+admin UI, SSO login, OpenAPI documents and health routes all return 404 from
+Caddy, so they are not reachable from the internet at all.
 
-Services communicate over an internal Docker bridge network (`postgres_ciris`). Container-to-container traffic uses internal hostnames:
-- `ciris-postgres` - Database
-- `ciris-billing` - Billing API
-- `ciris-proxy` - LLM Proxy
+## TLS
 
-## TLS Configuration
-
-### Certificate Management
-
-- Caddy automatically obtains and renews Let's Encrypt certificates
-- All public endpoints enforce HTTPS
-- HTTP requests redirect to HTTPS (except ACME challenges)
-
-### Domains with TLS
-
-| Domain | Service |
-|--------|---------|
-| billing1.ciris-services-1.ai | Billing US |
-| billing1.ciris-services-2.ai | Billing EU |
-| proxy1.ciris-services-1.ai | Proxy US |
-| proxy1.ciris-services-2.ai | Proxy EU |
-| lens.ciris-services-1.ai | Grafana/CIRISLens |
-| agents.ciris-services-1.ai | Billing alias |
+Caddy obtains and renews Let's Encrypt certificates automatically, sends HSTS
+(one year, preload), `X-Content-Type-Options: nosniff` and
+`X-Frame-Options: DENY`, and removes the `Server` header. Cloudflare proxies
+some hostnames; Caddy trusts Cloudflare's published ranges for the client IP.
+The CA trust store is kept current on every node, and the canonical's image is
+rebuilt on a freshly pulled base so its bundle is current too.
 
 ## Authentication
 
-### User Authentication (Mobile Clients)
-
-- Google OAuth 2.0 ID tokens
-- Token validation against multiple client IDs (Android app, web)
-- Tokens validated server-side using Google's public keys
-
-### API Key Authentication (Service-to-Service)
-
-- API keys stored as Argon2 hashes in PostgreSQL
-- Keys validated on each request by CIRISBilling
-- CIRISProxy delegates auth to CIRISBilling via callback
-
-### Admin Authentication
-
-- Google OAuth 2.0 for admin panel access
-- Restricted to specific Google account(s)
-- Session-based after initial OAuth flow
-
-### Service Tokens (Internal)
-
-- CIRISLens ingestion requires service tokens
-- Tokens stored in `cirislens.service_tokens` table
-- Each service (billing, proxy) has its own token
+| Caller | Mechanism |
+|--------|-----------|
+| Mobile and web users | Google OAuth 2.0 ID tokens, verified against Google's keys and the allowed client IDs |
+| Services and agents | API keys, stored as Argon2 hashes, verified by CIRISBilling |
+| LLM requests | CIRISProxy delegates authentication to CIRISBilling |
+| Admin panel | Google OAuth, restricted to named accounts |
+| Federation | Hybrid Ed25519 + ML-DSA-65 signatures; the trust root is a 2-of-3 holder-signed bundle |
 
 ## Authorization
 
-### Credit-Based Access Control
+Every LLM request needs sufficient credit; billing checks and deducts per
+request and refuses with 402 when the balance is exhausted. Rate limiting is
+applied by the upstream LLM providers.
 
-- All LLM requests require sufficient credit balance
-- Credits checked and deducted per request
-- No credit = request rejected (402 Payment Required)
+## Data protection
 
-### Rate Limiting
+### Zero data retention
 
-- Implemented at the LLM provider level
-- Rate limit errors logged but excluded from alerts
-- No application-level rate limiting currently
+CIRISProxy routes only to providers configured for zero data retention (Groq,
+Together AI, DeepInfra, OpenRouter) and runs with LiteLLM spend logging
+disabled. Prompt and response content is never stored by CIRISBridge.
 
-## Data Protection
+### Stored data
 
-### Zero Data Retention (ZDR)
+| Data | Where | Protection |
+|------|-------|------------|
+| Accounts, credits, charges | Spock (PostgreSQL 15) | Password auth; not exposed beyond the peer node |
+| API keys | Spock | Argon2 hash |
+| Federation keys and attestations | Canonical home (SQLite) | Public by design; private keys never leave the node |
+| Access logs | `/var/log/caddy/` | Client IP, path, status; rotated by size |
 
-CIRISProxy routes to ZDR-compliant LLM providers:
-- **Groq** - No request/response logging
-- **Together AI** - No request/response logging
-- **OpenRouter** - No request/response logging
+[runbooks/PII_INVENTORY.md](runbooks/PII_INVENTORY.md) lists every personal-data
+column and its row count; the daily status check fails if the schema drifts
+from it.
 
-LLM request content is never stored by CIRISBridge.
-
-### Database Security
-
-- PostgreSQL requires password authentication
-- Passwords contain special characters (32+ chars)
-- Bi-directional replication uses dedicated replication user
-- Database not exposed externally (localhost only)
-
-### Sensitive Data Storage
-
-| Data Type | Storage | Protection |
-|-----------|---------|------------|
-| User credentials | PostgreSQL | Argon2 hash |
-| API keys | PostgreSQL | Argon2 hash |
-| Service tokens | PostgreSQL | Plain (internal only) |
-| Google OAuth secrets | Ansible inventory | Not in git |
-| LLM provider API keys | .env files | Not in git |
-
-### What We Don't Store
+### Not stored
 
 - LLM prompts or responses
-- User IP addresses (beyond access logs)
-- Payment card details (handled by Google Play)
+- Payment card details (Google Play handles payment)
 
-## Secrets Management
+## Secrets
 
-### Inventory Secrets
+All production secrets live in `ansible/inventory/production.yml`, which is
+encrypted with Ansible Vault and never committed. Ansible renders each
+service's `.env` from it at deploy time, mode 600. Provider API keys, database
+passwords, OAuth credentials and the LiteLLM master key are all held there.
 
-All secrets are stored in `ansible/inventory/production.yml`:
-- Database passwords
-- API keys (Groq, Together, OpenRouter, OpenAI)
-- Google OAuth credentials
-- LiteLLM master key
-- Service tokens
+## Access
 
-This file is:
-- Listed in `.gitignore`
-- Never committed to version control
-- Required for deployment
+- SSH is key-only; password and keyboard-interactive login are disabled.
+- fail2ban bans repeated SSH failures (three attempts, one hour).
+- Ansible requires both SSH access and the vault password.
 
-### Environment Files
+## Monitoring
 
-Each service has a `.env` file generated by Ansible:
-- Created from templates during deployment
-- Contains service-specific secrets
-- Permissions: 600 (owner read/write only)
+`scripts/daily-status.sh` checks probes, certificates, containers, replication
+and error signatures, and exits non-zero on anything that needs attention.
+`scripts/surface-scan.py --diff` compares the exposed surface before and after
+maintenance.
 
-## Logging and Monitoring
+## Incident response
 
-### What's Logged
+| Event | Runbook |
+|-------|---------|
+| Intrusion | `ansible/runbooks/intrusion-response.yml`: IP blocking, forensic collection to `./forensics/`, credential-rotation checklist |
+| Personal-data breach | [runbooks/BREACH_NOTIFICATION.md](runbooks/BREACH_NOTIFICATION.md): GDPR Article 33 timeline, authorities, user notification |
 
-- Service health events
-- Authentication successes/failures
-- Credit transactions
-- Error events (excluding sensitive data)
+## Known limitations
 
-### Log Retention
+- No web application firewall or intrusion detection system.
+- No application-level rate limiting.
+- Root SSH is permitted (key-only).
+- The canonical's keys are held in the software key tier; its hosts have no TPM.
 
-- Logs stored in PostgreSQL (`cirislens.service_logs`)
-- No automatic purging currently configured
-- Accessible via Grafana dashboards
+## Reporting
 
-### Alert Configuration
-
-Alerts trigger on:
-- Service errors (ERROR/CRITICAL level)
-- High error rate (>5 in 5 minutes)
-- Billing service errors
-
-Excluded from alerts:
-- Play Integrity verification failures
-- Rate limit errors
-
-## Incident Response
-
-### Security Incident Runbook
-
-`ansible/runbooks/intrusion-response.yml` provides:
-- IP blocking via iptables
-- Forensic evidence collection
-- Credential rotation guidance
-- Incident documentation
-
-### Forensic Data Collection
-
-When triggered, collects:
-- Active network connections
-- Running processes
-- Docker container states
-- Authentication logs
-- iptables rules
-
-Data archived to `./forensics/` on control node.
-
-## Access Control
-
-### SSH Access
-
-- Key-based authentication only
-- Password authentication disabled
-- Root login permitted (keys only)
-- No SSH exposed through Cloudflare
-
-### Ansible Access
-
-- Requires SSH key access to nodes
-- Requires `production.yml` inventory file
-- Commands logged to shell history
-
-## Known Limitations
-
-### Not Yet Implemented
-
-- Application-level rate limiting
-- Web Application Firewall (WAF)
-- Intrusion Detection System (IDS)
-- Automated log rotation/purging
-- Multi-factor authentication for admin
-- IP allowlisting for admin access
-
-### Accepted Risks
-
-- Root SSH access (mitigated by key-only auth)
-- Single admin Google account for OAuth
-- No geographic access restrictions
-- Service tokens stored unhashed (internal use only)
-
-## Security Contacts
-
-- **Repository**: https://github.com/CIRISAI/CIRISBridge
-- **Monitoring**: https://lens.ciris-services-1.ai
-
-## Updating This Document
-
-This document should be updated when:
-- New security measures are implemented
-- Security configurations change
-- New services are added
-- Vulnerabilities are discovered and fixed
-
-Last updated: 2025-12-14
+Report security issues privately by email to `info@ciris.ai` with `SECURITY`
+in the subject line, the same address the other CIRIS repositories use. Do not
+open a public issue for a vulnerability.

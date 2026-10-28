@@ -10,7 +10,6 @@ maximalist footprint. Inventory lives in [`PII_INVENTORY.md`](PII_INVENTORY.md);
 this playbook references it and is re-evaluated whenever the inventory
 changes materially.
 
-Closes [CIRISBridge#2](https://github.com/CIRISAI/CIRISBridge/issues/2).
 Cross-referenced in `SECURITY.md` §Incident Response and `OPERATIONS.md`.
 
 ---
@@ -226,7 +225,7 @@ Next drill: **2026-11-13** (6mo from codification, then annual).
 
 ---
 
-## 8. Out of scope (per CIRISBridge#2)
+## 8. Out of scope
 
 - HIPAA, NYDFS, US state-specific breach laws — not in the public commitment
 - Detection layer (CIRISLensCore) — this playbook is post-detection

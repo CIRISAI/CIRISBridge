@@ -1,216 +1,121 @@
 # CIRISBridge
 
-Temporary scaffolding infrastructure for CIRIS Agent services. Designed to be retired when Veilid DHT becomes production-ready.
+Orchestration for the centralized services CIRIS agents depend on: credit
+billing, the LLM proxy, and the US canonical federation node. CIRISBridge
+deploys and configures these services; it does not contain them. Each service
+lives in its own repository and ships as a container image or wheel.
 
-## Overview
+This is transitional infrastructure. Each component is designed to step aside
+as decentralized alternatives mature.
 
-CIRISBridge provides multi-region infrastructure for:
-- **CIRISBilling** - Credit-based usage gating
-- **CIRISProxy** - LLM routing with Zero Data Retention
-- **CIRISDNS** - Self-hosted authoritative DNS (Constellation)
+## Services
+
+| Service | Repository | Runs on | Purpose |
+|---------|------------|---------|---------|
+| CIRISBilling | [CIRISBilling](https://github.com/CIRISAI/CIRISBilling) | US, EU | Credits, payments, user and API-key auth |
+| CIRISProxy | [CIRISProxy](https://github.com/CIRISAI/CIRISProxy) | US, EU | LLM routing to zero-data-retention providers (LiteLLM) |
+| Billing database | pgEdge Spock | US, EU | PostgreSQL 15, bidirectional multi-master replication |
+| CIRISServer | [CIRISServer](https://github.com/CIRISAI/CIRISServer) | US | Canonical federation node `ciris-canonical-1` (Reticulum transport, read API, lens) |
+| CIRISStatus | [CIRISStatus](https://github.com/CIRISAI/CIRISStatus) | US | Public status and scoring feed |
+| Caddy | — | US, EU | TLS termination and routing |
+
+Vault runs on both nodes as well; it belongs to CIRISCore and is not deployed
+from this repository.
 
 ## Architecture
 
 ```
-         Clients
-            │
-    ┌───────┴───────┐
-    │               │
-    ▼               ▼
-┌────────┐     ┌────────┐
-│ Vultr  │     │Hetzner │
-│  (US)  │◄───►│  (EU)  │
-│Chicago │     │Germany │
-└───┬────┘     └───┬────┘
-    │              │
-    │   Services   │
-    ├──────────────┤
-    │ Constellation│  DNS
-    │ PostgreSQL   │  Database (primary/replica)
-    │ CIRISBilling │  Credits API
-    │ CIRISProxy   │  LLM Gateway
-    │ Caddy        │  TLS termination
-    └──────────────┘
+                      Clients and agents
+                             │
+                  Cloudflare DNS (GeoDNS)
+                 ┌───────────┴───────────┐
+                 ▼                       ▼
+        ┌─────────────────┐     ┌─────────────────┐
+        │ US · Vultr      │     │ EU · Hetzner    │
+        │ Chicago         │     │ Nuremberg       │
+        │ 108.61.242.236  │     │ 46.224.81.217   │
+        ├─────────────────┤     ├─────────────────┤
+        │ Caddy           │     │ Caddy           │
+        │ CIRISBilling    │     │ CIRISBilling    │
+        │ CIRISProxy      │     │ CIRISProxy      │
+        │ Spock (5433) ◄──┼─────┼─► Spock (5433)  │
+        │ CIRISServer     │     │                 │
+        │ CIRISStatus     │     │                 │
+        └─────────────────┘     └─────────────────┘
 ```
 
-## Quick Start
+Billing and the proxy run active/active: either node serves any client, and
+the billing database replicates both ways.
 
-### Prerequisites
+## Endpoints
 
-- Terraform >= 1.0
-- Ansible >= 2.12
-- SSH key pair
+| Hostname | Node | Serves |
+|----------|------|--------|
+| `billing1.ciris-services-1.ai` | US | Billing API |
+| `billing1.ciris-services-2.ai` | EU | Billing API |
+| `proxy1.ciris-services-1.ai`, `llm01.ciris-services-1.ai` | US | LLM proxy |
+| `proxy1.ciris-services-2.ai`, `llm01.ciris-services-eu-1.com` | EU | LLM proxy |
+| `agents.ciris-services-1.ai`, `billing.ciris.ai` | US | Billing API (aliases) |
+| `lens.ciris-services-1.ai` | US | Canonical read API (`/v1/identity`, `/v1/federation/*`, `/lens/api/v1/*`) and status (`/status/*`, `/api/v1/scoring`) |
 
-### 1. Configure Credentials
+The proxy hostnames expose only the client API: `/v1/chat/completions`,
+`/v1/models`, `/v1/status`, `/v1/status/simple` and `/v1/web/search`. Every
+other path, including LiteLLM's admin API and UI, returns 404.
 
-```bash
-# Copy and edit Terraform variables
-cp terraform/terraform.tfvars.example terraform/terraform.tfvars
-vim terraform/terraform.tfvars
-
-# Copy and edit environment
-cp .env.example .env
-vim .env
-```
-
-### 2. Deploy Infrastructure
-
-```bash
-# Initialize and deploy
-./scripts/deploy.sh infra
-
-# This provisions:
-# - Vultr VPS in Chicago (~$24/mo)
-# - Hetzner VPS in Germany (~€6/mo)
-# - Firewalls, SSH keys, networking
-```
-
-### 3. Deploy Services
-
-```bash
-# Deploy all services
-./scripts/deploy.sh services
-
-# Or deploy individually
-./scripts/deploy.sh dns
-./scripts/deploy.sh billing
-./scripts/deploy.sh proxy
-```
-
-### 4. Verify Health
-
-```bash
-./scripts/health-check.sh
-```
-
-## Directory Structure
+## Repository layout
 
 ```
 CIRISBridge/
-├── terraform/           # Infrastructure as Code
-│   ├── main.tf         # Provider config, resources
-│   ├── variables.tf    # Input variables
-│   └── outputs.tf      # Outputs (IPs, inventory)
-├── ansible/             # Configuration Management
-│   ├── inventory/      # Host definitions
-│   ├── playbooks/      # Deployment playbooks
-│   └── roles/          # Service roles
-│       ├── common/     # Base OS setup
-│       ├── constellation/ # DNS — DECOMMISSIONED 2026-05-02 (Reticulum migration)
-│       ├── postgres/   # Database — DECOMMISSIONED 2026-05-02 (Spock multi-master)
-│       ├── caddy/      # TLS
-│       ├── billing/    # CIRISBilling
-│       └── proxy/      # CIRISProxy
-├── scripts/             # Operations scripts
-│   ├── deploy.sh       # Main deployment
-│   ├── health-check.sh # Service health
-│   ├── sync-records.sh # DNS sync
-│   ├── backup-db.sh    # Database backup
-│   └── failover-db.sh  # Manual failover
-└── docs/
+├── terraform/            Node provisioning (Vultr, Hetzner, test VPC)
+├── ansible/
+│   ├── inventory/        Hosts and secrets (production.yml is vault-encrypted, not committed)
+│   ├── playbooks/        site.yml (production), spock-billing.yml, test stack
+│   ├── roles/            One role per service
+│   └── runbooks/         Operational and incident runbooks
+├── runbooks/             Breach-notification playbook and PII inventory
+├── scripts/              Status checks and surface scanner
+└── tools/                SonarCloud CLI
 ```
 
-## Cost Breakdown
+## Deploying
 
-| Item | Monthly Cost |
-|------|-------------|
-| Vultr VC2 (2 vCPU, 4GB) | ~$24 |
-| Hetzner CX22 (2 vCPU, 4GB) | ~€6 |
-| Hetzner Volume (20GB) | ~€1 |
-| Domains (amortized) | ~$3 |
-| **Total** | **~$34/month** |
-
-## Test Environment
-
-Full end-to-end test stack with automated spin up/down. Tests the complete flow: Agent → Proxy → Billing → LLM.
+From `ansible/`:
 
 ```bash
-# Spin up test environment (~$42/month when running)
-cd ansible
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags up
+# Everything
+ansible-playbook -i inventory/production.yml playbooks/site.yml
 
-# Deploy services
-ansible-playbook -i inventory/test.yml playbooks/deploy-test-stack.yml
+# One service, all nodes
+ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing
 
-# Setup (create API key + test agent)
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags setup-e2e
-
-# Run end-to-end test
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags test
-
-# Spin down ($0/month when destroyed)
-ansible-playbook -i inventory/test.yml runbooks/test-env.yml --tags down
+# One service, one node
+ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing --limit eu
 ```
 
-See [ansible/runbooks/README.md](ansible/runbooks/README.md) for detailed test environment documentation.
+Tags: `common`, `caddy`, `billing`, `proxy`, `ciris-server`, `ciris-status`,
+`scheduler`. Node limits: `us`, `eu`. See [OPERATIONS.md](OPERATIONS.md) for day-to-day operation and
+[SECURITY.md](SECURITY.md) for the security model.
 
-## Operations
-
-### Health Check
+## Health
 
 ```bash
-./scripts/health-check.sh
+./scripts/daily-status.sh     # probes, TLS, disk, containers, replication, errors; exit 0/1/2
+./scripts/weekly-status.sh    # surface diff vs last week, cert expiry, disk trend
 ```
 
-### Database Backup
+## Test environment
 
-```bash
-POSTGRES_PASSWORD=xxx ./scripts/backup-db.sh
-```
+A disposable three-server stack in an isolated Vultr VPC exercises the full
+path, agent → proxy → billing → LLM provider. It costs about $42/month while
+running and nothing when destroyed. See
+[ansible/runbooks/README.md](ansible/runbooks/README.md).
 
-### Manual Failover
+## Retirement
 
-```bash
-./scripts/failover-db.sh status   # Check health
-./scripts/failover-db.sh promote  # Promote replica
-```
-
-### DNS Record Sync
-
-```bash
-./scripts/sync-records.sh
-```
-
-## DNS Configuration
-
-After deployment, configure at your registrar:
-
-**NS Records:**
-```
-ciris-services-1.ai  NS  ns1.ciris-services-1.ai
-ciris-services-1.ai  NS  ns1.ciris-services-2.ai
-```
-
-**Glue Records:**
-```
-ns1.ciris-services-1.ai  A  <VULTR_IP>
-ns1.ciris-services-2.ai  A  <HETZNER_IP>
-```
-
-## Retirement Path
-
-CIRISBridge is temporary infrastructure. It will be retired when:
-
-1. Veilid DHT is stable for peer discovery
-2. CIRIS agents register Veilid route IDs
-3. Clients migrate to Veilid-first resolution
-4. Centralized DNS traffic drops below 5%
-
-**Target: Full retirement within 18-24 months of Veilid production readiness.**
-
-## Related Repositories
-
-| Repo | Purpose |
-|------|---------|
-| [CIRISBilling](../CIRISBilling) | Credit management service |
-| [CIRISProxy](../CIRISProxy) | LLM routing proxy |
-| [CIRISDNS](../CIRISDNS) | DNS configuration |
-| [CIRISAgent](../CIRISAgent) | Agent runtime |
+CIRISBridge is temporary. Peer discovery and private routing move to the
+decentralized transport as it matures; billing may persist longest. Changes
+here should keep the infrastructure simple, inexpensive and easy to remove.
 
 ## License
 
-Apache 2.0 - See [LICENSE](LICENSE)
-
----
-
-*Transitional infrastructure—designed to step aside as decentralized alternatives mature.*
+GNU Affero General Public License v3.0. See [LICENSE](LICENSE).

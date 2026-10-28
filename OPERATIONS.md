@@ -1,253 +1,180 @@
 # CIRISBridge Operations Guide
 
-This guide covers day-to-day operations for the CIRISBridge infrastructure.
+Day-to-day operation of the production nodes. Commands run from `ansible/`
+unless noted, and need the vault password for `inventory/production.yml`.
 
-## Infrastructure Overview
+## Nodes
 
-CIRISBridge runs a multi-region deployment across two cloud providers:
+| Node | Inventory group | Provider | Location | IP |
+|------|-----------------|----------|----------|----|
+| US | `us` (`vultr`) | Vultr | Chicago | 108.61.242.236 |
+| EU | `eu` (`hetzner`) | Hetzner | Nuremberg | 46.224.81.217 |
 
-| Region | Provider | Location | IP | Role |
-|--------|----------|----------|-----|------|
-| US | Vultr | Chicago | 108.61.242.236 | Primary (Postgres primary, CIRISLens) |
-| EU | Hetzner | Germany | 46.224.81.217 | Secondary (Postgres replica) |
+## Containers
 
-## Services
+| Container | Nodes | Port | Purpose |
+|-----------|-------|------|---------|
+| `ciris-caddy` | US, EU | 80, 443 | TLS termination and routing |
+| `ciris-billing` | US, EU | 8000 (host network, behind Caddy) | Billing API |
+| `ciris-proxy` | US, EU | 4000 (localhost, behind Caddy) | LLM proxy (LiteLLM) |
+| `ciris-billing-spock` | US, EU | 5433 (peer node only) | Billing database, Spock multi-master |
+| `ciris-server` | US | 4242 tcp/udp (Reticulum), 4243 (read API) | Canonical federation node |
+| `ciris-status` | US | 4253 | Status and scoring feed |
+| `ciris-vault` | US, EU | 8210–8211 (peers only) | Owned by CIRISCore; not managed here |
 
-Each node runs the following containerized services:
-
-| Service | Container | Port | Description |
-|---------|-----------|------|-------------|
-| CIRISBilling | `ciris-billing` | 8000 | Credits, payments, user authentication |
-| CIRISProxy | `ciris-proxy` | 4000 | LLM routing with billing integration |
-| ~~PostgreSQL~~ | ~~`ciris-postgres`~~ | ~~5432~~ | **DECOMMISSIONED 2026-05-02** — replaced by Spock multi-master at `ciris-billing-spock:5433` |
-| Caddy | `ciris-caddy` | 80, 443 | TLS termination, reverse proxy |
-| ~~Constellation~~ | ~~`ciris-dns`~~ | ~~53~~ | **DECOMMISSIONED 2026-05-02** — Reticulum migration; containers stopped both nodes |
-
-Additionally, the US node runs:
-- **CIRISLens** (`ciris-lens`) - Centralized observability on port 8200
-- **Grafana** - Dashboards on port 3001
-
-## Common Operations
-
-### Checking Service Status
+## Checking health
 
 ```bash
-# From ansible/ directory
-
-# Check all containers on all nodes
-ansible all -i inventory/production.yml -m shell -a 'docker ps --format "table {{.Names}}\t{{.Status}}"'
-
-# Check specific node
-ansible vultr -i inventory/production.yml -m shell -a 'docker ps'
-ansible hetzner -i inventory/production.yml -m shell -a 'docker ps'
+# From the repository root
+./scripts/daily-status.sh         # GREEN / YELLOW / RED, exit 0 / 1 / 2
+./scripts/weekly-status.sh        # weekly report: surface diff, issues, certs, disk
+./scripts/surface-scan.py --internal --out before.json   # snapshot for a pre/post diff
+./scripts/surface-scan.py --diff before.json after.json
 ```
 
-### Viewing Logs
+The daily check covers external probes, TLS expiry, disk, container counts,
+Spock replication, conntrack headroom, a PII-schema canary, and container
+errors from the last 30 minutes. Errors are grouped by signature; known noise
+(rejected unauthenticated proxy requests, expected un-routable client dials)
+is reported but does not change the status.
+
+Quick ad-hoc checks:
 
 ```bash
-# Recent logs from a service
-ansible vultr -i inventory/production.yml -m shell -a 'docker logs ciris-billing --tail 50'
-ansible vultr -i inventory/production.yml -m shell -a 'docker logs ciris-proxy --tail 50'
-
-# Follow logs in real-time (run on server directly)
-ssh root@108.61.242.236 'docker logs -f ciris-billing'
-
-# Search for errors
-ansible all -i inventory/production.yml -m shell -a 'docker logs ciris-billing 2>&1 | grep -i error | tail -20'
+ansible all -i inventory/production.yml -m shell -a 'docker ps'
+ansible all -i inventory/production.yml -m shell -a 'docker logs ciris-billing --tail 50'
+curl -s https://billing1.ciris-services-1.ai/health
+curl -s https://proxy1.ciris-services-1.ai/v1/status/simple
 ```
 
-### Health Checks
+`/health` alone can pass while a dependency is down; use each service's own
+`/v1/status` when a maintenance step depends on it.
+
+## Deploying
 
 ```bash
-# Check all service health endpoints
-ansible all -i inventory/production.yml -m uri -a 'url=http://localhost:8080/health'
-ansible all -i inventory/production.yml -m uri -a 'url=http://localhost:4000/health/liveliness'
-
-# Check database connectivity
-ansible all -i inventory/production.yml -m shell -a 'docker exec ciris-postgres pg_isready -U postgres'
-
-# Check external endpoints (from your machine)
-curl -s https://billing1.ciris-services-1.ai/health | jq
-curl -s https://proxy1.ciris-services-1.ai/health/liveliness
+ansible-playbook -i inventory/production.yml playbooks/site.yml                       # everything
+ansible-playbook -i inventory/production.yml playbooks/site.yml --tags proxy          # one service
+ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing --limit eu
 ```
 
-### Restarting Services
+Deploy through Ansible rather than editing files on a node, so the nodes stay
+identical to the repository. `docker compose restart` does not reload
+environment variables; the roles recreate containers when configuration
+changes.
+
+### Billing
+
+Each billing deploy saves the running image digest for rollback, pulls the new
+image, waits for `/health`, runs migrations on the US node only, and
+smoke-tests `/health`. To roll back:
 
 ```bash
-# Restart a single service (preserves data)
-ansible vultr -i inventory/production.yml -m shell -a 'cd /opt/ciris/billing && docker compose down && docker compose up -d'
-
-# Restart via Ansible playbook (recommended - ensures config sync)
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags proxy
-
-# Restart all services on a node
-ansible vultr -i inventory/production.yml -m shell -a 'cd /opt/ciris/billing && docker compose restart'
-ansible vultr -i inventory/production.yml -m shell -a 'cd /opt/ciris/proxy && docker compose restart'
+ansible-playbook -i inventory/production.yml runbooks/billing-rollback.yml
+ansible-playbook -i inventory/production.yml runbooks/billing-rollback.yml --limit us
 ```
 
-### Updating Container Images
+### Canonical (ciris-server)
+
+The version is pinned in `roles/ciris-server/defaults/main.yml`. Before a new
+version goes to the canonical:
+
+1. Run it in a capped acceptance harness: a copy of the live home, no network,
+   the production 2 GiB memory limit, at least 12 minutes. It must stay
+   announced and unhalted, keep the same transit keys, and log no errors.
+2. Take a pinned pre-roll copy of `/data/cirisserver/data` (SQLite online
+   backup) and `identity/`, outside the role's snapshot rotation, and tag the
+   running image for rollback.
+3. Deploy with `--tags ciris-server`. The role refuses a version that is not on
+   PyPI, snapshots the home, rebuilds, and fails unless `/health` reports
+   `canonical_announce = announced`.
+
+The canonical's identity must persist byte-identically across upgrades; never
+deploy with `ciris_server_fresh=true` against production.
+
+## Billing database (Spock)
 
 ```bash
-# Pull latest images and restart
-ansible all -i inventory/production.yml -m shell -a 'cd /opt/ciris/billing && docker compose pull && docker compose down && docker compose up -d'
-ansible all -i inventory/production.yml -m shell -a 'cd /opt/ciris/proxy && docker compose pull && docker compose down && docker compose up -d'
-
-# Or use Ansible playbook (pulls and restarts)
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags proxy
+ansible-playbook -i inventory/production.yml playbooks/spock-billing.yml --tags status
+ansible-playbook -i inventory/production.yml runbooks/backup-verify.yml
+ansible-playbook -i inventory/production.yml runbooks/billing-ops.yml --tags status --limit us
 ```
 
-### Database Operations
+Both subscriptions should report `replicating`. Schema migrations replicate
+through `spock.replicate_ddl()`, and every billing deploy adds any public table
+missing from the `default` replication set.
+
+| Table | Conflict resolution |
+|-------|---------------------|
+| users, credits, api_keys | last update wins |
+| charges, transactions | first update wins |
+
+Sequences are partitioned per node, so inserts on either node never collide.
+
+## Scheduled jobs
+
+Systemd timers on each node (`systemctl list-timers | grep ciris`):
+
+| Timer | Nodes | Schedule | Purpose |
+|-------|-------|----------|---------|
+| `ciris-heartbeat` | US, EU | every 20 min | Node liveness |
+| `ciris-daily-checks` | US, EU | 06:00 UTC | Certificates, replication, disk |
+| `ciris-spock-backup` | US, EU | 03:00 UTC | Billing database backup |
+| `ciris-weekly-security` | US, EU | Sun 04:00 UTC | Security posture scan |
+| `ciris-weekly-cleanup` | US, EU | Sat 03:00 UTC | Docker and log cleanup |
+
+## Disk
 
 ```bash
-# Connect to database
-ansible vultr -i inventory/production.yml -m shell -a 'docker exec -it ciris-postgres psql -U postgres -d ciris_billing'
-
-# Check replication status (on primary)
-ansible vultr -i inventory/production.yml -m shell -a 'docker exec ciris-postgres psql -U postgres -c "SELECT * FROM pg_stat_replication;"'
-
-# Check replication lag (on replica)
-ansible hetzner -i inventory/production.yml -m shell -a 'docker exec ciris-postgres psql -U postgres -c "SELECT pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn(), pg_last_xact_replay_timestamp();"'
-
-# Backup database
-ansible vultr -i inventory/production.yml -m shell -a 'docker exec ciris-postgres pg_dump -U postgres ciris_billing > /tmp/backup.sql'
+ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags status
+ansible-playbook -i inventory/production.yml runbooks/disk-cleanup.yml --tags docker-clean
 ```
 
-## Monitoring
+Container logs are capped (json-file, 3 × 50 MB). Canonical upgrade snapshots
+are pruned to the two most recent; pinned pre-roll copies are kept until
+removed by hand.
 
-### CIRISLens (Grafana)
-
-Access Grafana at: https://lens.ciris-services-1.ai
-
-Available dashboards:
-- **Service Health** - Container status, health checks
-- **Error Correlation** - Cross-service error tracking
-- **Billing Analytics** - Credit usage, transactions
-
-### Log Queries
-
-Logs are stored in PostgreSQL (`cirislens.service_logs` table). Query via Grafana or directly:
-
-```sql
--- Recent errors
-SELECT timestamp, service_name, level, message
-FROM cirislens.service_logs
-WHERE level IN ('ERROR', 'CRITICAL')
-ORDER BY timestamp DESC
-LIMIT 50;
-
--- Errors by service (last hour)
-SELECT service_name, COUNT(*) as error_count
-FROM cirislens.service_logs
-WHERE level IN ('ERROR', 'CRITICAL')
-  AND timestamp > NOW() - INTERVAL '1 hour'
-GROUP BY service_name;
-```
-
-### Alerts
-
-Grafana alerts are configured for:
-- Service errors detected (any ERROR/CRITICAL log)
-- High error rate (>5 errors in 5 minutes)
-- Billing service errors
-
-Excluded from alerts:
-- Play Integrity errors (expected for debug builds)
-- Rate limit errors (normal operation)
-
-## Deployment
-
-### Full Deployment
-
-```bash
-cd ansible/
-ansible-playbook -i inventory/production.yml playbooks/site.yml
-```
-
-### Service-Specific Deployment
-
-```bash
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags proxy
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags dns
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags lens
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags caddy
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags postgres
-```
-
-### Single-Region Deployment
-
-```bash
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing --limit vultr
-ansible-playbook -i inventory/production.yml playbooks/site.yml --tags billing --limit hetzner
-```
-
-## Incident Response
-
-Use the runbooks in `ansible/runbooks/` for structured incident response:
+## Incidents
 
 | Situation | Runbook |
 |-----------|---------|
-| General service issues | `incident-response.yml` |
+| General service issue | `incident-response.yml` (`--tags diagnose`, `fix`, `close`) |
 | Security incident | `intrusion-response.yml` |
-| Provider outage | `provider-outage.yml` |
-| Adding a region | `add-region.yml` |
-| Removing a region | `remove-region.yml` |
+| Provider outage | `provider-outage.yml` (`--tags detect`, `failover`, `failback`) |
+| Personal-data breach | [runbooks/BREACH_NOTIFICATION.md](runbooks/BREACH_NOTIFICATION.md) |
 
-Quick diagnostics:
-```bash
-ansible-playbook -i inventory/production.yml runbooks/incident-response.yml --tags diagnose
-```
+### Rebooting a node
 
-## Troubleshooting
+Both nodes also host CIRISCore's Vault, which seals when its container
+restarts. Coordinate any reboot or Docker daemon restart with CIRISCore so it
+can unseal Vault afterwards. Restart the EU node first, then the US node.
 
-### Service Won't Start
+### Troubleshooting
 
-1. Check logs: `docker logs ciris-<service> --tail 100`
-2. Check config: Verify `.env` file has all required variables
-3. Check network: Ensure `postgres_ciris` Docker network exists
-4. Check dependencies: Database must be running first
+- **A service won't start.** `docker logs <container> --tail 100`, then check
+  its generated `.env` under `/opt/ciris/<service>/`.
+- **Billing can't reach the database.** Check `ciris-billing-spock` is running
+  and `spock.sub_show_status()` reports `replicating`.
+- **TLS errors.** Caddy renews automatically. Check `docker logs ciris-caddy`,
+  that DNS points at the node, and that ports 80 and 443 are open.
+- **Containers can't resolve names after a reboot.** Containers inherit the
+  host resolver at start; `/etc/docker/daemon.json` pins explicit DNS servers
+  on every node.
 
-### Database Connection Issues
-
-1. Verify PostgreSQL is running: `docker ps | grep postgres`
-2. Check connection: `docker exec ciris-postgres pg_isready`
-3. Verify credentials in `.env` match database
-4. Check network connectivity between containers
-
-### TLS Certificate Issues
-
-Caddy auto-manages certificates. If issues occur:
-1. Check Caddy logs: `docker logs ciris-caddy`
-2. Verify DNS points to correct IP
-3. Ensure ports 80/443 are open
-4. Restart Caddy: `cd /opt/ciris/caddy && docker compose restart`
-
-### Replication Lag
-
-If replica is behind:
-1. Check network between regions
-2. Verify replication slot exists on primary
-3. Check subscription status on replica
-4. Monitor with: `SELECT * FROM pg_stat_subscription;`
-
-## File Locations
-
-On each node:
+## File locations
 
 | Path | Contents |
 |------|----------|
-| `/opt/ciris/billing/` | Billing service docker-compose and env |
-| `/opt/ciris/proxy/` | Proxy service docker-compose and env |
-| `/opt/ciris/postgres/` | ~~PostgreSQL~~ — DECOMMISSIONED 2026-05-02; final dumps at `/data/backups/legacy-postgres-decom/` |
-| `/opt/ciris/billing-spock/` | pgEdge Spock multi-master billing DB (replaces `/opt/ciris/postgres/`) |
-| `/opt/ciris/caddy/` | Caddy docker-compose and Caddyfile |
-| `/opt/ciris/dns/` | ~~Constellation DNS config~~ — DECOMMISSIONED 2026-05-02 (Reticulum migration); containers stopped, data volume retained |
-| `/opt/ciris/lens/` | CIRISLens (US only) — observability stack |
-| `/var/log/ciris/` | Service log directories |
+| `/opt/ciris/caddy/` | Caddyfile, compose file, certificates |
+| `/opt/ciris/billing/` | Billing compose file and environment |
+| `/opt/ciris/proxy/` | Proxy compose file and environment |
+| `/opt/ciris/pgedge-billing/` | Spock database |
+| `/opt/ciris/server/` | ciris-server build context and compose file (US) |
+| `/data/cirisserver/` | Canonical home: `data/`, `identity/`, `logs/`, snapshots (US) |
+| `/opt/ciris/status/` | CIRISStatus (US) |
+| `/opt/ciris/scheduler/` | Timer scripts |
+| `/var/log/caddy/` | Caddy access logs (JSON) |
 
-## Contacts
+## Repository
 
-- **Monitoring**: https://lens.ciris-services-1.ai
-- **Repository**: https://github.com/CIRISAI/CIRISBridge
+https://github.com/CIRISAI/CIRISBridge
