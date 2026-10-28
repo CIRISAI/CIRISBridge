@@ -167,7 +167,7 @@ services:
       CIRISLENS_SCRUB_KEY_PATH: /app/keys/scrub_private.key
       # Federation steward identity — Ed25519 seed used by persist's
       # engine.steward_sign() hot path for federation_keys mirror writes.
-      # Bridge ran the lens-steward bootstrap (runbooks/lens-steward-bootstrap.yml)
+      # Bridge ran the lens-steward bootstrap (the lens-steward federation bootstrap)
       # ahead of this rollout, so the FK target row exists in cirislens.federation_keys.
       # STEWARD_KEY_ID defaults to "lens-steward" — only the path is required.
       CIRISLENS_STEWARD_KEY_PATH: /app/keys/lens-steward.seed

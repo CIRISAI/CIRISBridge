@@ -1,11 +1,9 @@
 ---
 # Spock Billing Stack Deployment
 #
-# Deploys pgEdge Postgres with Spock multi-master replication for billing
-# Runs on port 5433 alongside existing postgres (5432) for safe migration
-#
-# IMPORTANT: This is a SEPARATE deployment from existing postgres.
-# Both can run simultaneously to allow data migration and testing.
+# Deploys pgEdge Postgres with Spock multi-master replication for billing,
+# on port 5433 with host networking. Billing on both nodes reads and writes
+# through it; each node replicates to the other.
 #
 # Usage:
 #   # Deploy pgEdge containers to all nodes:
@@ -39,7 +37,7 @@
         msg: |
           Deploying pgEdge Spock Postgres to {{ inventory_hostname }}
           - Spock Node: {{ spock_node_name }}
-          - Port: {{ pgedge_port }} (separate from existing 5432)
+          - Port: {{ pgedge_port }}
           - Container: {{ pgedge_container_name }}
           - Data Dir: {{ pgedge_data_dir }}
 

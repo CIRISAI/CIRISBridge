@@ -21,10 +21,10 @@ class TestReadmeDocumentation:
         content = readme.read_text()
 
         required_sections = [
-            "Overview",
-            "Quick Start",
+            "Services",
             "Architecture",
-            "Cost",
+            "Endpoints",
+            "Deploying",
         ]
 
         for section in required_sections:
@@ -36,10 +36,9 @@ class TestReadmeDocumentation:
         content = readme.read_text()
 
         commands = [
-            "deploy.sh",
-            "health-check.sh",
+            "ansible-playbook",
+            "daily-status.sh",
             "terraform",
-            "ansible",
         ]
 
         for cmd in commands:
@@ -80,7 +79,6 @@ class TestClaudeMdDocumentation:
         key_files = [
             "main.tf",
             "site.yml",
-            "deploy.sh",
         ]
 
         for filename in key_files:
@@ -112,13 +110,12 @@ class TestLicenseDocumentation:
         license_file = project_root / "LICENSE"
         assert license_file.exists(), "LICENSE should exist"
 
-    def test_license_is_apache2(self, project_root):
-        """Test that license is Apache 2.0."""
+    def test_license_is_agpl3(self, project_root):
+        """Test that the license is the GNU AGPL, as the README states."""
         license_file = project_root / "LICENSE"
         content = license_file.read_text()
 
-        assert "Apache" in content, "License should be Apache 2.0"
-        assert "2.0" in content, "License should be version 2.0"
+        assert "GNU Affero General Public License" in content, "License should be the GNU AGPL"
 
 
 class TestExampleFiles:

@@ -1,8 +1,7 @@
 ---
 # pgEdge Postgres defaults for CIRISBridge Spock multi-master replication
 #
-# IMPORTANT: This runs on port 5433 alongside existing postgres on 5432
-# to allow side-by-side testing before migration.
+# The billing database: port 5433, host networking, replicating to the peer node.
 
 pgedge_image: "pgedge/pgedge:pg15-latest"
 pgedge_container_name: "ciris-billing-spock"

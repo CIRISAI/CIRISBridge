@@ -101,22 +101,9 @@ class TestAnsibleRoleIntegration:
         content = caddyfile.read_text()
 
         # Caddy should reference billing and proxy
-        assert "ciris-billing" in content, "Caddy should route to billing"
-        assert "ciris-proxy" in content, "Caddy should route to proxy"
-
-    def test_postgres_before_billing(self, ansible_dir):
-        """Test that PostgreSQL is deployed before billing."""
-        site_yml = ansible_dir / "playbooks" / "site.yml"
-        content = site_yml.read_text()
-
-        # Look for role references in the roles: section
-        postgres_pos = content.find("- postgres")
-        billing_pos = content.find("- billing")
-
-        assert postgres_pos != -1, "postgres role should be defined"
-        assert billing_pos != -1, "billing role should be defined"
-        assert postgres_pos < billing_pos, "postgres should be before billing"
-
+        # Billing runs on host networking; the proxy is a container on the Caddy network
+        assert "host.docker.internal:8000" in content, "Caddy should route to billing"
+        assert "ciris-proxy:4000" in content, "Caddy should route to proxy"
 
 class TestConfigurationConsistency:
     """Tests for configuration consistency across components."""
@@ -148,15 +135,6 @@ class TestConfigurationConsistency:
 
     def test_domain_consistency(self, ansible_dir):
         """Test that domain references are consistent."""
-        # Check zones template
-        zones_file = ansible_dir / "roles" / "constellation" / "templates" / "zones.yaml.j2"
-        zones_content = zones_file.read_text()
-
-        assert "{{ primary_domain }}" in zones_content, \
-            "Zones should reference primary_domain"
-        assert "{{ secondary_domain }}" in zones_content, \
-            "Zones should reference secondary_domain"
-
         # Check Caddy config
         caddyfile = ansible_dir / "roles" / "caddy" / "templates" / "Caddyfile.j2"
         caddy_content = caddyfile.read_text()
@@ -167,26 +145,6 @@ class TestConfigurationConsistency:
 
 class TestDeploymentFlow:
     """Tests for the deployment flow."""
-
-    def test_deploy_script_flow(self, scripts_dir, mock_subprocess):
-        """Test that deploy.sh calls tools in correct order."""
-        deploy_script = scripts_dir / "deploy.sh"
-        content = deploy_script.read_text()
-
-        # Find positions of key operations
-        terraform_init_pos = content.find("terraform init")
-        terraform_plan_pos = content.find("terraform plan")
-        terraform_apply_pos = content.find("terraform apply")
-        ansible_playbook_pos = content.find("ansible-playbook")
-
-        # Verify order
-        assert terraform_init_pos < terraform_plan_pos, \
-            "terraform init should be before plan"
-        assert terraform_plan_pos < terraform_apply_pos, \
-            "terraform plan should be before apply"
-
-        # Ansible should come after Terraform
-        # (Either in same function or services follows infra)
 
     def test_health_check_after_deploy(self, scripts_dir):
         """Test that health check can verify deployment."""
