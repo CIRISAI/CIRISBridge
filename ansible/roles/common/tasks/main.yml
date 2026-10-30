@@ -227,3 +227,67 @@
     # buckets must equal max for O(1) lookup; both written together.
     - { name: "net.netfilter.nf_conntrack_max", value: "262144" }
     - { name: "net.netfilter.nf_conntrack_buckets", value: "262144" }
+
+# CVE-2026-98432 (Linux IPv4 TCP use-after-free, CVSS 9.8). Interim until the
+# fixed kernel is running: drop TCP packets carrying IPv4 options (the
+# trigger), and turn MPTCP off, the public exploit's precondition. Containers
+# with public Go listeners also set it in their own namespace (caddy role).
+- name: CVE-2026-98432 — config directory
+  ansible.builtin.file:
+    path: /etc/ciris
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags: [cve-2026-98432]
+
+- name: CVE-2026-98432 — install the IPv4-options drop rule
+  ansible.builtin.copy:
+    src: cve-2026-98432.nft
+    dest: /etc/ciris/cve-2026-98432.nft
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [cve-2026-98432]
+
+# Not nftables.service: /etc/nftables.conf flushes the whole ruleset, which
+# would remove the ufw and Docker rules.
+- name: CVE-2026-98432 — load the rule at boot
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ciris-cve-2026-98432.service
+    content: |
+      [Unit]
+      Description=CVE-2026-98432 interim mitigation (drop TCP with IPv4 options)
+      After=network-pre.target
+      Wants=network-pre.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=true
+      ExecStart=/usr/sbin/nft -f /etc/ciris/cve-2026-98432.nft
+      ExecStop=/usr/sbin/nft delete table ip cve_2026_98432
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [cve-2026-98432]
+
+- name: CVE-2026-98432 — load the rule now and at boot
+  ansible.builtin.systemd:
+    name: ciris-cve-2026-98432.service
+    enabled: true
+    state: restarted
+    daemon_reload: true
+  tags: [cve-2026-98432]
+
+- name: CVE-2026-98432 — disable MPTCP on the host
+  ansible.posix.sysctl:
+    name: net.mptcp.enabled
+    value: "0"
+    sysctl_file: /etc/sysctl.d/90-ciris-cve-2026-98432.conf
+    state: present
+    sysctl_set: true
+    reload: true
+  tags: [cve-2026-98432]
