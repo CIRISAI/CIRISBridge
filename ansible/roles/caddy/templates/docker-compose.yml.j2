@@ -29,6 +29,13 @@ services:
       - /var/log/caddy:/var/log/caddy
     environment:
       CADDY_INGRESS_NETWORKS: ciris
+      # CVE-2026-98432: Go 1.24+ listens with MPTCP by default, the
+      # precondition of the public exploit. Plain TCP only.
+      GODEBUG: multipathtcp=0
+    # Each container has its own network namespace, which starts with MPTCP
+    # enabled whatever the host says; disable it here as well.
+    sysctls:
+      net.mptcp.enabled: "0"
 {% if ciris_environment | default('production') == 'test' %}
     # Test environment - use local networks
     networks:
