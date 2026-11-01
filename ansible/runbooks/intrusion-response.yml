@@ -88,7 +88,7 @@
         creates: "{{ forensics_dir }}/iptables.txt"
 
     - name: "PRESERVE: Create forensics archive"
-      ansible.builtin.archive:
+      community.general.archive:
         path: "{{ forensics_dir }}"
         dest: "/tmp/forensics-{{ incident_id }}.tar.gz"
         format: gz

@@ -7,12 +7,14 @@
   ansible.builtin.file:
     path: "{{ item.path }}"
     state: directory
-    mode: '0755'
+    mode: "{{ item.mode }}"
     owner: "{{ item.owner }}"
     group: "{{ item.group }}"
   loop:
-    - { path: /opt/ciris/pgedge-billing, owner: root, group: root }
-    - { path: "{{ pgedge_data_dir }}", owner: "1020", group: "1020" }  # pgedge user inside container
+    - { path: /opt/ciris/pgedge-billing, owner: root, group: root, mode: "0755" }
+    # The data directory: pgedge user inside the container. Postgres refuses
+    # to start if it is group- or world-accessible.
+    - { path: "{{ pgedge_data_dir }}", owner: "1020", group: "1020", mode: "0700" }
 
 - name: Check if pgEdge container exists
   community.docker.docker_container_info:
