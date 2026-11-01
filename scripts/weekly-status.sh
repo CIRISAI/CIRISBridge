@@ -16,9 +16,13 @@ NOW_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 NOW_DATE=$(date -u +"%Y-%m-%d")
 
 # Find previous week's snapshot if one exists
-PREV_SNAPSHOT=$(ls -t /tmp/bridge-weekly-*.json 2>/dev/null | head -1)
-THIS_SNAPSHOT=/tmp/bridge-weekly-$(date -u +%Y%m%d).json
-REPORT=/tmp/bridge-weekly-report-$(date -u +%Y%m%d).md
+# Snapshots and reports hold internal state; keep them in a private directory.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/cirisbridge"
+mkdir -p -m 700 "$STATE_DIR"
+# Earlier snapshots were written to /tmp; fall back to the newest one there.
+PREV_SNAPSHOT=$(ls -t "$STATE_DIR"/bridge-weekly-*.json /tmp/bridge-weekly-*.json 2>/dev/null | head -1)
+THIS_SNAPSHOT="$STATE_DIR/bridge-weekly-$(date -u +%Y%m%d).json"
+REPORT="$STATE_DIR/bridge-weekly-report-$(date -u +%Y%m%d).md"
 
 WORST=0
 note_yellow() { [ $WORST -lt 1 ] && WORST=1; }
@@ -160,7 +164,7 @@ for h in s.get('internal', []):
   esac
   echo
   echo "_Next weekly run: $(date -u -d '+7 days' +%Y-%m-%d)._"
-  echo "_Snapshots preserved at \`/tmp/bridge-weekly-*.json\`; rotate manually if disk pressure._"
+  echo "_Snapshots are kept in \`$STATE_DIR\`._"
 
 } > "$REPORT"
 
