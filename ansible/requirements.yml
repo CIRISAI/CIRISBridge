@@ -1,0 +1,7 @@
+---
+# Collections the roles, playbooks and runbooks use.
+# ansible-galaxy collection install -r requirements.yml
+collections:
+  - name: community.docker
+  - name: community.general
+  - name: ansible.posix
