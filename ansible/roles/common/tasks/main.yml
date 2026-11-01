@@ -238,7 +238,7 @@
     state: directory
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
   tags: [cve-2026-98432]
 
 - name: CVE-2026-98432 — install the IPv4-options drop rule
@@ -247,7 +247,7 @@
     dest: /etc/ciris/cve-2026-98432.nft
     owner: root
     group: root
-    mode: "0644"
+    mode: "0600"
   tags: [cve-2026-98432]
 
 # Not nftables.service: /etc/nftables.conf flushes the whole ruleset, which
