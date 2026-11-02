@@ -4,7 +4,7 @@
 # Wheel: pip install ciris-server==<version> on python:3.12-slim.
 # Runbook: ../CIRISServer/FSD/LENS_TO_SERVER_MIGRATION.md
 
-ciris_server_version: "0.5.243"
+ciris_server_version: "0.5.244"
 ciris_server_image_tag: "ciris-server:{{ ciris_server_version }}"
 
 # Log filter override. Empty = RUST_LOG unset, so the binary's own EnvFilter
@@ -12,6 +12,18 @@ ciris_server_image_tag: "ciris-server:{{ ciris_server_version }}"
 # the deploy, then redeploy without it, e.g. CIRISServer#788:
 #   -e ciris_server_rust_log=info,ciris_edge::replication=debug,...
 ciris_server_rust_log: ""
+
+# Same-key equivocation detector cadence (0.5.244+). On the canonical its page
+# query full-scans federation_attestations per row and never finishes a pass,
+# pinning a core from ~30 min after boot (CIRISPersist#1177). "off" pauses the
+# detector (local detection only, no penalties) until persist 61.0.0 fixes the
+# query; then set "" to return to the server's 900 s default.
+ciris_server_equivocation_cadence_secs: "off"
+
+# Edge's blob durability pass interval (0.5.244+). Quadratic on the canonical,
+# which acks every blob; 3600 until CIRISEdge#933 makes it linear. "" keeps
+# edge's 15-min default.
+ciris_server_durability_interval_secs: "3600"
 
 # One-off install of a local wheel instead of PyPI (e.g. an untagged CI build
 # for a coordinated cutover). Empty = the normal PyPI pin above. Pass all three
