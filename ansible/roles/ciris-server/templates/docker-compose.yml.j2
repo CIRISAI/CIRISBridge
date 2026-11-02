@@ -40,6 +40,12 @@ services:
       # Bounded diagnostic window only (see ciris_server_rust_log in defaults).
       RUST_LOG: "{{ ciris_server_rust_log }}"
 {% endif %}
+{% if ciris_server_equivocation_cadence_secs %}
+      CIRIS_EQUIVOCATION_CADENCE_SECS: "{{ ciris_server_equivocation_cadence_secs }}"
+{% endif %}
+{% if ciris_server_durability_interval_secs %}
+      CIRIS_DURABILITY_INTERVAL_SECS: "{{ ciris_server_durability_interval_secs }}"
+{% endif %}
       # NOTE: MALLOC_ARENA_MAX is deliberately NOT set here.
       #
       # 0.5.200 calls diag::tune_allocator() -> mallopt(M_ARENA_MAX, 2) from the
