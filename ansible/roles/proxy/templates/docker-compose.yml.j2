@@ -42,7 +42,13 @@ services:
       # probes — verified from the status container's live sockets, which show
       # connections to 172.67.163.135:443 and 104.21.42.160:443 (CF edge), not
       # to a docker name. Retargeting is upstream; this makes it possible.
+      #
+      # US only: lens_cirislens exists only on vultr (as in the caddy role). On
+      # EU an unconditional join fails `compose up` with "network declared as
+      # external, but could not be found".
+{% if inventory_hostname == 'vultr' %}
       - cirislens
+{% endif %}
 {% endif %}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -62,7 +68,9 @@ networks:
   ciris:
     external: true
     name: postgres_ciris
+{% if inventory_hostname == 'vultr' %}
   cirislens:
     external: true
     name: lens_cirislens
+{% endif %}
 {% endif %}
